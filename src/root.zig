@@ -17,6 +17,8 @@ pub const webgl = @import("shim/webgl.zig");
 pub const webgl_state = @import("shim/webgl_state.zig");
 pub const webgl_backend = @import("shim/webgl_backend.zig");
 pub const webgl_shader = @import("shim/webgl_shader.zig");
+pub const webgl_program = @import("shim/webgl_program.zig");
+pub const webgl_draw = @import("shim/webgl_draw.zig");
 
 // Re-export main types for convenience
 pub const Window = window.Window;
@@ -31,6 +33,8 @@ pub const WebGLBindState = webgl_state.BindState;
 pub const WebGLBufferManager = webgl_state.BufferManager;
 pub const WebGLSokolBackend = webgl_backend.sokolBufferBackend;
 pub const WebGLShaderTable = webgl_shader.ShaderTable;
+pub const WebGLProgramTable = webgl_program.ProgramTable;
+pub const WebGLDrawState = webgl_draw;
 
 test {
     // Run all module tests

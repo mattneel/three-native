@@ -12,6 +12,7 @@ const slog = sokol.log;
 const TriangleRenderer = @import("renderer.zig").TriangleRenderer;
 const webgl_state = @import("../shim/webgl_state.zig");
 const webgl_backend = @import("../shim/webgl_backend.zig");
+const webgl_draw = @import("../shim/webgl_draw.zig");
 
 /// Window configuration options
 pub const WindowConfig = struct {
@@ -89,7 +90,11 @@ fn sokolInit() callconv(.c) void {
     });
 
     // Wire WebGL buffer backend to sokol
-    webgl_state.globalBufferManager().setBackend(webgl_backend.getSokolBackend());
+    webgl_state.globalBufferManager().setBackend(webgl_backend.getSokolBackend()) catch |err| {
+        std.debug.print("[window] buffer backfill failed: {}\n", .{err});
+        sapp.requestQuit();
+        return;
+    };
 
     // Initialize triangle renderer
     g_state.triangle_renderer = TriangleRenderer.init();
@@ -127,6 +132,9 @@ fn sokolFrame() callconv(.c) void {
             renderer.draw();
         }
     }
+
+    // Flush queued WebGL draw calls
+    webgl_draw.flush();
 
     // End pass and commit
     sgfx.endPass();

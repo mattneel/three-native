@@ -41,6 +41,13 @@ pub const BindState = struct {
         };
     }
 
+    pub fn getBoundBuffer(self: *const Self, target: BufferTarget) ?webgl.BufferId {
+        return switch (target) {
+            .array => self.array_buffer,
+            .element_array => self.element_array_buffer,
+        };
+    }
+
     pub fn bufferData(
         self: *Self,
         table: *webgl.BufferTable,
@@ -100,6 +107,10 @@ pub const BufferManager = struct {
         };
     }
 
+    pub fn initWithAllocator(_: std.mem.Allocator) Self {
+        return init();
+    }
+
     pub fn initWithBackend(backend: *const webgl.BufferBackend) Self {
         return .{
             .buffers = webgl.BufferTable.init(),
@@ -108,12 +119,22 @@ pub const BufferManager = struct {
         };
     }
 
-    pub fn setBackend(self: *Self, backend: *const webgl.BufferBackend) void {
+    pub fn setBackend(self: *Self, backend: *const webgl.BufferBackend) !void {
         self.backend = backend;
+        try self.buffers.backfill(backend);
+    }
+
+    pub fn getBoundBuffer(self: *const Self, target: BufferTarget) ?webgl.BufferId {
+        return self.binds.getBoundBuffer(target);
     }
 
     pub fn reset(self: *Self) void {
+        self.buffers.deinit();
         self.* = Self.init();
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.buffers.deinit();
     }
 
     pub fn createBuffer(self: *Self, desc: webgl.BufferDesc) !webgl.BufferId {
@@ -152,7 +173,8 @@ pub fn globalBufferManager() *BufferManager {
 // =============================================================================
 
 test "BindState binds array buffer" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{ .size = 64, .usage = .vertex });
@@ -161,7 +183,8 @@ test "BindState binds array buffer" {
 }
 
 test "BindState binds element array buffer" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{ .size = 64, .usage = .index });
@@ -170,7 +193,8 @@ test "BindState binds element array buffer" {
 }
 
 test "BindState rejects invalid handles" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const bogus = webgl.BufferId{ .index = @intCast(webgl.MaxBuffers + 1), .generation = 1 };
@@ -179,7 +203,8 @@ test "BindState rejects invalid handles" {
 }
 
 test "BindState unbind clears state" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{});
@@ -189,7 +214,8 @@ test "BindState unbind clears state" {
 }
 
 test "BindState rejects stale handles" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{});
@@ -198,7 +224,8 @@ test "BindState rejects stale handles" {
 }
 
 test "BindState bufferData updates bound buffer" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{ .usage = .vertex });
@@ -212,7 +239,8 @@ test "BindState bufferData updates bound buffer" {
 }
 
 test "BindState bufferData rejects missing bind" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     _ = try table.alloc(.{});
@@ -221,7 +249,8 @@ test "BindState bufferData rejects missing bind" {
 }
 
 test "BindState bufferData rejects wrong target" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{ .usage = .index });
@@ -232,7 +261,8 @@ test "BindState bufferData rejects wrong target" {
 }
 
 test "BindState bufferData assigns usage on first upload" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{});
@@ -246,7 +276,8 @@ test "BindState bufferData assigns usage on first upload" {
 }
 
 test "BindState bufferData rejects target switch after upload" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{});
@@ -259,7 +290,8 @@ test "BindState bufferData rejects target switch after upload" {
 }
 
 test "BindState bufferData rejects oversize" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const id = try table.alloc(.{ .usage = .vertex });
@@ -270,7 +302,8 @@ test "BindState bufferData rejects oversize" {
 }
 
 test "BindState onBufferDeleted clears bindings" {
-    var table = webgl.BufferTable.init();
+    var table = webgl.BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var state = BindState{};
 
     const a = try table.alloc(.{ .usage = .vertex });
@@ -287,7 +320,8 @@ test "BindState onBufferDeleted clears bindings" {
 }
 
 test "BufferManager create/bind/data/delete works" {
-    var mgr = BufferManager.init();
+    var mgr = BufferManager.initWithAllocator(testing.allocator);
+    defer mgr.deinit();
 
     const id = try mgr.createBuffer(.{ .usage = .vertex });
     try mgr.bindBuffer(.array, id);
@@ -343,7 +377,9 @@ test "BufferManager uses backend when provided" {
         .destroy = BackendStub.destroy,
     };
 
-    var mgr = BufferManager.initWithBackend(&backend);
+    var mgr = BufferManager.initWithAllocator(testing.allocator);
+    defer mgr.deinit();
+    try mgr.setBackend(&backend);
     const id = try mgr.createBuffer(.{ .usage = .vertex });
     try mgr.bindBuffer(.array, id);
 
@@ -354,6 +390,55 @@ test "BufferManager uses backend when provided" {
 
     try testing.expect(mgr.deleteBuffer(id));
     try testing.expectEqual(@as(u32, 1), stub.destroy_calls);
+}
+
+test "BufferManager backfills uploads when backend set" {
+    const BackendStub = struct {
+        create_calls: u32 = 0,
+        update_calls: u32 = 0,
+
+        const Self = @This();
+
+        fn create(ctx: ?*anyopaque, size: usize, usage: webgl.BufferUsage) webgl.BufferBackend.Handle {
+            _ = size;
+            _ = usage;
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.create_calls += 1;
+            return 1;
+        }
+
+        fn update(ctx: ?*anyopaque, handle: webgl.BufferBackend.Handle, data: []const u8) void {
+            _ = handle;
+            _ = data;
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.update_calls += 1;
+        }
+
+        fn destroy(ctx: ?*anyopaque, handle: webgl.BufferBackend.Handle) void {
+            _ = ctx;
+            _ = handle;
+        }
+    };
+
+    var stub = BackendStub{};
+    const backend = webgl.BufferBackend{
+        .ctx = &stub,
+        .create = BackendStub.create,
+        .update = BackendStub.update,
+        .destroy = BackendStub.destroy,
+    };
+
+    var mgr = BufferManager.initWithAllocator(testing.allocator);
+    defer mgr.deinit();
+    const id = try mgr.createBuffer(.{ .usage = .vertex });
+    try mgr.bindBuffer(.array, id);
+    const data = [_]u8{0} ** 24;
+    try mgr.bufferData(.array, data[0..]);
+
+    try testing.expectEqual(@as(u32, 0), stub.create_calls);
+    try mgr.setBackend(&backend);
+    try testing.expectEqual(@as(u32, 1), stub.create_calls);
+    try testing.expectEqual(@as(u32, 1), stub.update_calls);
 }
 
 test "globalBufferManager wires backend" {
@@ -399,7 +484,7 @@ test "globalBufferManager wires backend" {
 
     const mgr = globalBufferManager();
     mgr.reset();
-    mgr.setBackend(&backend);
+    try mgr.setBackend(&backend);
 
     const id = try mgr.createBuffer(.{ .usage = .vertex });
     try mgr.bindBuffer(.array, id);

@@ -111,6 +111,11 @@ pub const ContextTable = struct {
 
 pub const MaxBuffers: usize = 256;
 pub const MaxBufferBytes: usize = 16 * 1024 * 1024;
+// CPU backfill pool: 4096 * 4 KiB = 16 MiB total.
+// Napkin: enough for ~4 buffers at 4 MiB each before backend is live.
+pub const CpuBlockSizeBytes: usize = 4096;
+pub const CpuBlockCount: usize = 4096;
+pub const CpuPoolBytes: usize = CpuBlockSizeBytes * CpuBlockCount;
 
 pub const BufferBackend = struct {
     pub const Handle = u32;
@@ -144,11 +149,74 @@ pub const Buffer = struct {
     data_len: u32,
     update_count: u32,
     backend: BufferBackend.Handle,
+    cpu_block_start: u16,
+    cpu_block_count: u16,
 };
+
+const CpuSlice = struct {
+    block_start: u16,
+    block_count: u16,
+    size: u32,
+};
+
+const CpuBufferPool = struct {
+    data: [CpuPoolBytes]u8 = undefined,
+    used: [CpuBlockCount]bool = [_]bool{false} ** CpuBlockCount,
+
+    const Self = @This();
+
+    fn reset(self: *Self) void {
+        @memset(self.used[0..], false);
+    }
+
+    fn alloc(self: *Self, size: usize) !CpuSlice {
+        if (size == 0) return error.InvalidSize;
+        const blocks_needed = @as(usize, (size + CpuBlockSizeBytes - 1) / CpuBlockSizeBytes);
+        if (blocks_needed > CpuBlockCount) return error.TooLarge;
+        var run_len: usize = 0;
+        var run_start: usize = 0;
+        for (0..CpuBlockCount) |idx| {
+            if (!self.used[idx]) {
+                if (run_len == 0) run_start = idx;
+                run_len += 1;
+                if (run_len >= blocks_needed) {
+                    for (run_start..run_start + blocks_needed) |block_idx| {
+                        self.used[block_idx] = true;
+                    }
+                    return .{
+                        .block_start = @intCast(run_start),
+                        .block_count = @intCast(blocks_needed),
+                        .size = @intCast(size),
+                    };
+                }
+            } else {
+                run_len = 0;
+            }
+        }
+        return error.OutOfMemory;
+    }
+
+    fn free(self: *Self, cpu_slice: CpuSlice) void {
+        if (cpu_slice.block_count == 0) return;
+        const start: usize = @intCast(cpu_slice.block_start);
+        const count: usize = @intCast(cpu_slice.block_count);
+        for (start..start + count) |idx| {
+            self.used[idx] = false;
+        }
+    }
+
+    fn slice(self: *Self, cpu_slice: CpuSlice) []u8 {
+        const start = @as(usize, cpu_slice.block_start) * CpuBlockSizeBytes;
+        return self.data[start .. start + @as(usize, cpu_slice.size)];
+    }
+};
+
+var g_cpu_pool: CpuBufferPool = CpuBufferPool{};
 
 pub const BufferTable = struct {
     entries: [MaxBuffers]Entry,
     count: u16,
+    cpu_pool: *CpuBufferPool,
 
     const Self = @This();
 
@@ -174,13 +242,20 @@ pub const BufferTable = struct {
                     .data_len = 0,
                     .update_count = 0,
                     .backend = 0,
+                    .cpu_block_start = 0,
+                    .cpu_block_count = 0,
                 },
             };
         }
         return .{
             .entries = entries,
             .count = 0,
+            .cpu_pool = &g_cpu_pool,
         };
+    }
+
+    pub fn initWithAllocator(_: std.mem.Allocator) Self {
+        return init();
     }
 
     pub fn alloc(self: *Self, desc: BufferDesc) !BufferId {
@@ -204,6 +279,8 @@ pub const BufferTable = struct {
                     .data_len = 0,
                     .update_count = 0,
                     .backend = 0,
+                    .cpu_block_start = 0,
+                    .cpu_block_count = 0,
                 };
                 entry.active = true;
                 self.count += 1;
@@ -221,6 +298,14 @@ pub const BufferTable = struct {
     pub fn free(self: *Self, id: BufferId) bool {
         if (!self.isValid(id)) return false;
         var entry = &self.entries[id.index];
+        if (entry.buffer.cpu_block_count != 0) {
+            const slice = CpuSlice{
+                .block_start = entry.buffer.cpu_block_start,
+                .block_count = entry.buffer.cpu_block_count,
+                .size = entry.buffer.data_len,
+            };
+            self.cpu_pool.free(slice);
+        }
         entry.active = false;
         entry.generation +%= 1;
         entry.buffer = .{
@@ -233,6 +318,8 @@ pub const BufferTable = struct {
             .data_len = 0,
             .update_count = 0,
             .backend = 0,
+            .cpu_block_start = 0,
+            .cpu_block_count = 0,
         };
         self.count -= 1;
         return true;
@@ -248,6 +335,22 @@ pub const BufferTable = struct {
         if (!self.isValid(id)) return error.InvalidHandle;
         if (data.len > MaxBufferBytes) return error.TooLarge;
         var buffer = &self.entries[id.index].buffer;
+        if (buffer.cpu_block_count != 0) {
+            self.cpu_pool.free(.{
+                .block_start = buffer.cpu_block_start,
+                .block_count = buffer.cpu_block_count,
+                .size = buffer.data_len,
+            });
+            buffer.cpu_block_count = 0;
+            buffer.cpu_block_start = 0;
+        }
+        if (data.len > 0) {
+            const slice = try self.cpu_pool.alloc(data.len);
+            const dst = self.cpu_pool.slice(slice);
+            @memcpy(dst, data);
+            buffer.cpu_block_start = slice.block_start;
+            buffer.cpu_block_count = slice.block_count;
+        }
         buffer.size = @intCast(data.len);
         buffer.data_len = @intCast(data.len);
         buffer.update_count +%= 1;
@@ -264,6 +367,15 @@ pub const BufferTable = struct {
             buffer.backend = handle;
         }
         backend.update(backend.ctx, buffer.backend, data);
+        if (buffer.cpu_block_count != 0) {
+            self.cpu_pool.free(.{
+                .block_start = buffer.cpu_block_start,
+                .block_count = buffer.cpu_block_count,
+                .size = buffer.data_len,
+            });
+            buffer.cpu_block_count = 0;
+            buffer.cpu_block_start = 0;
+        }
 
         buffer.size = @intCast(data.len);
         buffer.data_len = @intCast(data.len);
@@ -277,6 +389,38 @@ pub const BufferTable = struct {
             backend.destroy(backend.ctx, entry.buffer.backend);
         }
         return self.free(id);
+    }
+
+    pub fn backfill(self: *Self, backend: *const BufferBackend) !void {
+        for (&self.entries) |*entry| {
+            if (!entry.active) continue;
+            var buffer = &entry.buffer;
+            if (buffer.backend != 0) continue;
+            if (buffer.cpu_block_count != 0) {
+                const data = self.cpu_pool.slice(.{
+                    .block_start = buffer.cpu_block_start,
+                    .block_count = buffer.cpu_block_count,
+                    .size = buffer.data_len,
+                });
+                if (data.len == 0) continue;
+                const handle = backend.create(backend.ctx, data.len, buffer.usage);
+                if (handle == 0) return error.BackendFailed;
+                buffer.backend = handle;
+                backend.update(backend.ctx, buffer.backend, data);
+                self.cpu_pool.free(.{
+                    .block_start = buffer.cpu_block_start,
+                    .block_count = buffer.cpu_block_count,
+                    .size = buffer.data_len,
+                });
+                buffer.cpu_block_count = 0;
+                buffer.cpu_block_start = 0;
+            }
+        }
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.* = Self.init();
+        self.cpu_pool.reset();
     }
 };
 
@@ -332,7 +476,8 @@ test "ContextTable free rejects invalid handles" {
 }
 
 test "BufferTable allocates and frees" {
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     try testing.expectEqual(@as(u16, 0), table.count);
 
     const id = try table.alloc(.{ .size = 1024, .usage = .vertex });
@@ -351,7 +496,8 @@ test "BufferTable allocates and frees" {
 }
 
 test "BufferTable rejects allocation when full" {
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     for (0..MaxBuffers) |_| {
         _ = try table.alloc(.{});
     }
@@ -359,7 +505,8 @@ test "BufferTable rejects allocation when full" {
 }
 
 test "BufferTable invalidates stale handles" {
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     const id1 = try table.alloc(.{});
     try testing.expect(table.free(id1));
 
@@ -370,7 +517,8 @@ test "BufferTable invalidates stale handles" {
 }
 
 test "BufferTable free rejects invalid handles" {
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     const bogus = BufferId{ .index = @intCast(MaxBuffers + 1), .generation = 1 };
     try testing.expect(!table.free(bogus));
 
@@ -380,7 +528,8 @@ test "BufferTable free rejects invalid handles" {
 }
 
 test "BufferTable free resets buffer state" {
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     const id = try table.alloc(.{ .size = 128, .usage = .vertex });
     const data = [_]u8{0} ** 64;
     try table.updateData(id, data[0..]);
@@ -394,7 +543,8 @@ test "BufferTable free resets buffer state" {
 }
 
 test "BufferTable updateData updates size and count" {
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     const id = try table.alloc(.{});
 
     const data_a = [_]u8{0} ** 128;
@@ -412,7 +562,8 @@ test "BufferTable updateData updates size and count" {
 }
 
 test "BufferTable updateData rejects oversize" {
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     const id = try table.alloc(.{});
     const data = try testing.allocator.alloc(u8, MaxBufferBytes + 1);
     defer testing.allocator.free(data);
@@ -457,7 +608,8 @@ test "BufferTable uploadData uses backend once" {
         }
     };
 
-    var table = BufferTable.init();
+    var table = BufferTable.initWithAllocator(testing.allocator);
+    defer table.deinit();
     var stub = BackendStub{};
     const backend = BufferBackend{
         .ctx = &stub,

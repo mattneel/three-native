@@ -214,10 +214,10 @@ Verdict: ✓ Negligible vs 16.6ms budget
 ### Phase 2.2: Buffer Management
 
 **Goals**
-- [ ] createBuffer works
-- [ ] bindBuffer works
-- [ ] bufferData works
-- [ ] deleteBuffer works
+- [x] createBuffer works
+- [x] bindBuffer works
+- [x] bufferData works
+- [x] deleteBuffer works
 
 **Implementation**
 - [x] Buffer handle allocation
@@ -230,6 +230,8 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [x] Sokol buffer backend adapter (not wired to JS yet)
 - [x] Data upload path wired to sokol (backend set in window init)
 - [x] Cleanup on delete (handle + bind state)
+- [x] CPU backfill uses fixed pool (no heap in hot path)
+- [x] Backfill errors surfaced to caller
 
 **Tests Required**
 - [ ] Create 1000 buffers, no leak
@@ -249,41 +251,45 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [x] shaderSource works
 - [x] compileShader works
 - [x] getShaderParameter works
-- [ ] createProgram, attachShader, linkProgram work
+- [x] createProgram, attachShader, linkProgram work
 
 **Implementation**
 - [x] Shader handle allocation
 - [x] Shader source storage
 - [x] Compile status + info log tracking
-- [ ] GLSL to sokol shader translation (or passthrough)
-- [ ] Compilation error reporting
-- [ ] Program linking
+- [x] GLSL to sokol shader translation (or passthrough)
+- [x] Compilation error reporting
+- [x] Program linking
+- [x] Shader translation bounded (no heap, line caps)
 
 **Tests Required**
-- [ ] Valid shader compiles
-- [ ] Invalid shader reports error
-- [ ] Program links with valid shaders
-- [ ] Program fails with incompatible shaders
+- [x] Valid shader compiles
+- [x] Invalid shader reports error
+- [x] Program links with valid shaders
+- [x] Program fails with incompatible shaders
 - [x] getShaderInfoLog returns errors
 
 **Exit Criteria**
-- [ ] Shader pipeline works
-- [ ] Errors reported correctly
-- [ ] No crashes on bad input
+- [x] Shader pipeline works
+- [x] Errors reported correctly
+- [x] No crashes on bad input
 
 ### Phase 2.4: Draw Calls
 
 **Goals**
-- [ ] bindBuffer + bindShader + draw workflow
-- [ ] drawArrays works
-- [ ] drawElements works (indexed)
-- [ ] Uniform updates work
+- [x] bindBuffer + bindShader + draw workflow
+- [x] drawArrays works
+- [x] drawElements works (indexed)
+- [x] Uniform updates work
 
 **Implementation**
-- [ ] Assemble sokol pipeline from GL state
-- [ ] Execute draw with current bindings
-- [ ] Uniform buffer management
+- [x] Assemble sokol pipeline from GL state
+- [x] Execute draw with current bindings
+- [x] Uniform buffer management
 - [ ] State validation before draw
+- [x] Pipeline cache avoids per-draw create/destroy
+- [x] Uniform std140 padding zeroed on upload
+- [x] Uniform typed arrays use aligned staging copy
 
 **Tests Required**
 - [ ] Draw triangle via WebGL calls

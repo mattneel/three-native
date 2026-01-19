@@ -23,16 +23,13 @@ pub const Shader = struct {
     id: ShaderId,
     kind: ShaderKind,
     source_len: u32,
-    source: ?[]u8,
     compiled: bool,
     info_len: u32,
-    info_log: ?[]u8,
 };
 
 pub const ShaderTable = struct {
     entries: [MaxShaders]Entry,
     count: u16,
-    allocator: std.mem.Allocator,
 
     const Self = @This();
 
@@ -40,13 +37,11 @@ pub const ShaderTable = struct {
         active: bool,
         generation: u16,
         shader: Shader,
+        source_bytes: [MaxShaderSourceBytes]u8,
+        info_bytes: [MaxShaderInfoLogBytes]u8,
     };
 
     pub fn init() Self {
-        return initWithAllocator(std.heap.page_allocator);
-    }
-
-    pub fn initWithAllocator(allocator: std.mem.Allocator) Self {
         var entries: [MaxShaders]Entry = undefined;
         for (&entries, 0..) |*entry, idx| {
             entry.* = .{
@@ -59,18 +54,21 @@ pub const ShaderTable = struct {
                     },
                     .kind = .vertex,
                     .source_len = 0,
-                    .source = null,
                     .compiled = false,
                     .info_len = 0,
-                    .info_log = null,
                 },
+                .source_bytes = [_]u8{0} ** MaxShaderSourceBytes,
+                .info_bytes = [_]u8{0} ** MaxShaderInfoLogBytes,
             };
         }
         return .{
             .entries = entries,
             .count = 0,
-            .allocator = allocator,
         };
+    }
+
+    pub fn initWithAllocator(_: std.mem.Allocator) Self {
+        return init();
     }
 
     pub fn alloc(self: *Self, kind: ShaderKind) !ShaderId {
@@ -82,17 +80,12 @@ pub const ShaderTable = struct {
                     .index = @intCast(idx),
                     .generation = entry.generation,
                 };
-                if (entry.shader.source) |buf| {
-                    self.allocator.free(buf);
-                }
                 entry.shader = .{
                     .id = id,
                     .kind = kind,
                     .source_len = 0,
-                    .source = null,
                     .compiled = false,
                     .info_len = 0,
-                    .info_log = null,
                 };
                 entry.active = true;
                 self.count += 1;
@@ -111,43 +104,30 @@ pub const ShaderTable = struct {
         if (!self.isValid(id)) return error.InvalidHandle;
         if (source.len > MaxShaderSourceBytes) return error.TooLarge;
         var entry = &self.entries[id.index];
-        if (entry.shader.source) |buf| {
-            self.allocator.free(buf);
-        }
-        if (entry.shader.info_log) |buf| {
-            self.allocator.free(buf);
-        }
         if (source.len == 0) {
-            entry.shader.source = null;
             entry.shader.source_len = 0;
             entry.shader.compiled = false;
-            entry.shader.info_log = null;
             entry.shader.info_len = 0;
             return;
         }
-        const copy = try self.allocator.alloc(u8, source.len);
-        @memcpy(copy, source);
-        entry.shader.source = copy;
+        @memcpy(entry.source_bytes[0..source.len], source);
         entry.shader.source_len = @intCast(source.len);
         entry.shader.compiled = false;
-        entry.shader.info_log = null;
         entry.shader.info_len = 0;
     }
 
     pub fn getSource(self: *Self, id: ShaderId) ?[]const u8 {
         if (!self.isValid(id)) return null;
-        return self.entries[id.index].shader.source;
+        const entry = &self.entries[id.index];
+        if (entry.shader.source_len == 0) return null;
+        return entry.source_bytes[0..@as(usize, entry.shader.source_len)];
     }
 
     pub fn compile(self: *Self, id: ShaderId) !void {
         if (!self.isValid(id)) return error.InvalidHandle;
         var entry = &self.entries[id.index];
-        if (entry.shader.info_log) |buf| {
-            self.allocator.free(buf);
-            entry.shader.info_log = null;
-            entry.shader.info_len = 0;
-        }
-        if (entry.shader.source == null or entry.shader.source_len == 0) {
+        entry.shader.info_len = 0;
+        if (entry.shader.source_len == 0) {
             entry.shader.compiled = false;
             try self.setInfoLog(entry, "shader source missing");
             return;
@@ -157,18 +137,14 @@ pub const ShaderTable = struct {
 
     pub fn getInfoLog(self: *Self, id: ShaderId) ?[]const u8 {
         if (!self.isValid(id)) return null;
-        return self.entries[id.index].shader.info_log;
+        const entry = &self.entries[id.index];
+        if (entry.shader.info_len == 0) return null;
+        return entry.info_bytes[0..@as(usize, entry.shader.info_len)];
     }
 
     pub fn free(self: *Self, id: ShaderId) bool {
         if (!self.isValid(id)) return false;
         var entry = &self.entries[id.index];
-        if (entry.shader.source) |buf| {
-            self.allocator.free(buf);
-        }
-        if (entry.shader.info_log) |buf| {
-            self.allocator.free(buf);
-        }
         entry.active = false;
         entry.generation +%= 1;
         entry.shader = .{
@@ -178,10 +154,8 @@ pub const ShaderTable = struct {
             },
             .kind = .vertex,
             .source_len = 0,
-            .source = null,
             .compiled = false,
             .info_len = 0,
-            .info_log = null,
         };
         self.count -= 1;
         return true;
@@ -194,40 +168,21 @@ pub const ShaderTable = struct {
     }
 
     pub fn reset(self: *Self) void {
-        self.deinit();
-        self.* = Self.initWithAllocator(self.allocator);
+        self.* = Self.init();
     }
 
     pub fn deinit(self: *Self) void {
-        for (&self.entries) |*entry| {
-            if (entry.active) {
-                if (entry.shader.source) |buf| {
-                    self.allocator.free(buf);
-                    entry.shader.source = null;
-                }
-                if (entry.shader.info_log) |buf| {
-                    self.allocator.free(buf);
-                    entry.shader.info_log = null;
-                }
-                entry.active = false;
-            }
-        }
-        self.count = 0;
+        self.* = Self.init();
     }
 
     fn setInfoLog(self: *Self, entry: *Entry, log: []const u8) !void {
         if (log.len > MaxShaderInfoLogBytes) return error.TooLarge;
-        if (entry.shader.info_log) |buf| {
-            self.allocator.free(buf);
-        }
+        _ = self;
         if (log.len == 0) {
-            entry.shader.info_log = null;
             entry.shader.info_len = 0;
             return;
         }
-        const copy = try self.allocator.alloc(u8, log.len);
-        @memcpy(copy, log);
-        entry.shader.info_log = copy;
+        @memcpy(entry.info_bytes[0..log.len], log);
         entry.shader.info_len = @intCast(log.len);
     }
 };
@@ -243,14 +198,15 @@ pub fn globalShaderTable() *ShaderTable {
 // =============================================================================
 
 test "ShaderTable allocates and frees" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     const id = try table.alloc(.vertex);
     try testing.expect(table.isValid(id));
     const sh = table.get(id) orelse return error.UnexpectedNull;
     try testing.expectEqual(ShaderKind.vertex, sh.kind);
     try testing.expectEqual(@as(u32, 0), sh.source_len);
-    try testing.expect(sh.source == null);
+    try testing.expectEqual(@as(u32, 0), sh.info_len);
     try testing.expect(!sh.compiled);
 
     try testing.expect(table.free(id));
@@ -258,8 +214,9 @@ test "ShaderTable allocates and frees" {
 }
 
 test "ShaderTable rejects allocation when full" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     for (0..MaxShaders) |_| {
         _ = try table.alloc(.fragment);
     }
@@ -267,8 +224,9 @@ test "ShaderTable rejects allocation when full" {
 }
 
 test "ShaderTable invalidates stale handles" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     const id1 = try table.alloc(.vertex);
     try testing.expect(table.free(id1));
 
@@ -279,15 +237,17 @@ test "ShaderTable invalidates stale handles" {
 }
 
 test "ShaderTable free rejects invalid handles" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     const bogus = ShaderId{ .index = @intCast(MaxShaders + 1), .generation = 1 };
     try testing.expect(!table.free(bogus));
 }
 
 test "ShaderTable setSource stores a copy" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     const id = try table.alloc(.vertex);
     const src = "void main() {}";
     try table.setSource(id, src);
@@ -299,14 +259,15 @@ test "ShaderTable setSource stores a copy" {
     const sh = table.get(id) orelse return error.UnexpectedNull;
     try testing.expectEqual(@as(u32, src.len), sh.source_len);
     try testing.expect(!sh.compiled);
-    try testing.expect(sh.info_log == null);
+    try testing.expectEqual(@as(u32, 0), sh.info_len);
 
     try testing.expect(table.free(id));
 }
 
 test "ShaderTable setSource rejects oversize" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     const id = try table.alloc(.vertex);
     const data = try testing.allocator.alloc(u8, MaxShaderSourceBytes + 1);
     defer testing.allocator.free(data);
@@ -314,8 +275,9 @@ test "ShaderTable setSource rejects oversize" {
 }
 
 test "ShaderTable compile fails without source" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     const id = try table.alloc(.fragment);
     try table.compile(id);
     const sh = table.get(id) orelse return error.UnexpectedNull;
@@ -325,12 +287,13 @@ test "ShaderTable compile fails without source" {
 }
 
 test "ShaderTable compile succeeds with source" {
-    var table = ShaderTable.initWithAllocator(testing.allocator);
-    defer table.deinit();
+    const table = globalShaderTable();
+    table.reset();
+    defer table.reset();
     const id = try table.alloc(.vertex);
     try table.setSource(id, "void main() {}");
     try table.compile(id);
     const sh = table.get(id) orelse return error.UnexpectedNull;
     try testing.expect(sh.compiled);
-    try testing.expect(sh.info_log == null);
+    try testing.expectEqual(@as(u32, 0), sh.info_len);
 }
