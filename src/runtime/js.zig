@@ -713,7 +713,15 @@ export fn js_load(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSVa
     };
     defer if (sanitized.owned) rt.allocator.free(sanitized.bytes);
 
-    return c.JS_Eval(ctx, sanitized.bytes.ptr, sanitized.bytes.len, filename, 0);
+    // Ensure a NUL-terminated buffer in case the parser relies on it.
+    const eval_buf = rt.allocator.alloc(u8, sanitized.bytes.len + 1) catch {
+        return throwInternalError(ctx, "failed to allocate eval buffer");
+    };
+    defer rt.allocator.free(eval_buf);
+    @memcpy(eval_buf[0..sanitized.bytes.len], sanitized.bytes);
+    eval_buf[sanitized.bytes.len] = 0;
+
+    return c.JS_Eval(ctx, eval_buf.ptr, sanitized.bytes.len, filename, 0);
 }
 
 export fn js_setTimeout(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
