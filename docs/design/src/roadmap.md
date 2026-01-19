@@ -190,26 +190,26 @@ Verdict: ✓ Negligible vs 16.6ms budget
 ### Phase 2.1: WebGL Context Creation
 
 **Goals**
-- [ ] `canvas.getContext('webgl')` returns context
-- [ ] Context has correct properties
-- [ ] Context is usable object in JS
+- [x] `canvas.getContext('webgl')` returns context
+- [x] Context has correct properties
+- [x] Context is usable object in JS
 
 **Implementation**
-- [ ] Canvas shim with getContext
-- [ ] WebGLRenderingContext object
-- [ ] Property getters (drawingBufferWidth, etc.)
-- [ ] Register with JS runtime
+- [x] Canvas shim with getContext
+- [x] WebGLRenderingContext object
+- [x] Property getters (drawingBufferWidth, etc.)
+- [x] Register with JS runtime
 
 **Tests Required**
-- [ ] getContext returns truthy
-- [ ] Context has expected properties
-- [ ] Multiple getContext calls return same context
-- [ ] Invalid context type returns null
+- [x] getContext returns truthy
+- [x] Context has expected properties
+- [x] Multiple getContext calls return same context
+- [x] Invalid context type returns null
 
 **Exit Criteria**
-- [ ] `canvas.getContext('webgl')` works
-- [ ] Properties readable
-- [ ] No crashes
+- [x] `canvas.getContext('webgl')` works
+- [x] Properties readable
+- [x] No crashes
 
 ### Phase 2.2: Buffer Management
 

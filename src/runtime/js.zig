@@ -56,6 +56,7 @@ pub const Runtime = struct {
         };
 
         c.JS_SetLogFunc(ctx, logFunc);
+        try installDomStubs(ctx);
 
         return .{
             .ctx = ctx,
@@ -182,6 +183,43 @@ fn throwTypeError(ctx: *c.JSContext, msg: [:0]const u8) c.JSValue {
 
 fn throwInternalError(ctx: *c.JSContext, msg: [:0]const u8) c.JSValue {
     return c.JS_Throw(ctx, c.JS_NewString(ctx, msg.ptr));
+}
+
+fn installDomStubs(ctx: *c.JSContext) !void {
+    const script =
+        "var _global = this;\n" ++
+        "if (!_global.globalThis) _global.globalThis = _global;\n" ++
+        "if (!_global.window) _global.window = _global;\n" ++
+        "if (!_global.window.devicePixelRatio) _global.window.devicePixelRatio = 1;\n" ++
+        "if (!_global.window.addEventListener) _global.window.addEventListener = function(){};\n" ++
+        "if (!_global.window.removeEventListener) _global.window.removeEventListener = function(){};\n" ++
+        "var document = _global.document || {};\n" ++
+        "document.body = document.body || { appendChild: function(){} };\n" ++
+        "document.createElement = function(tag){\n" ++
+        "  if (tag === 'canvas') {\n" ++
+        "    var canvas = { width: 800, height: 600, style: {}, addEventListener: function(){}, removeEventListener: function(){} };\n" ++
+        "    canvas.getContext = function(type){\n" ++
+        "      if (type === 'webgl' || type === 'webgl2') {\n" ++
+        "        if (typeof gl !== 'undefined') {\n" ++
+        "          gl.drawingBufferWidth = canvas.width;\n" ++
+        "          gl.drawingBufferHeight = canvas.height;\n" ++
+        "          gl.canvas = canvas;\n" ++
+        "          return gl;\n" ++
+        "        }\n" ++
+        "      }\n" ++
+        "      return null;\n" ++
+        "    };\n" ++
+        "    return canvas;\n" ++
+        "  }\n" ++
+        "  return { style: {}, addEventListener: function(){}, removeEventListener: function(){} };\n" ++
+        "};\n" ++
+        "_global.document = document;\n";
+
+    const val = c.JS_Eval(ctx, script.ptr, script.len, "dom_stubs", 0);
+    if (val == c.JS_EXCEPTION) {
+        dumpException(ctx);
+        return error.EvalFailed;
+    }
 }
 
 const GL_ARRAY_BUFFER: u32 = 34962;
@@ -1191,6 +1229,29 @@ test "requestAnimationFrame schedules and fires" {
 
     const called = try rt.evalInt("raf_called", "test");
     try testing.expectEqual(@as(i32, 1), called);
+}
+
+test "document.createElement canvas getContext" {
+    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.eval(
+        \\var c = document.createElement('canvas');
+        \\c.width = 320;
+        \\c.height = 240;
+        \\var ctx0 = c.getContext('webgl');
+        \\var ctx1 = c.getContext('webgl');
+        \\var ok_ctx = (ctx0 === ctx1) ? 1 : 0;
+        \\var ok_null = (c.getContext('nope') === null) ? 1 : 0;
+        \\var ok_w = (ctx0.drawingBufferWidth === 320) ? 1 : 0;
+        \\var ok_h = (ctx0.drawingBufferHeight === 240) ? 1 : 0;
+    , "test");
+
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_ctx", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_null", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_w", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_h", "test"));
 }
 
 test "JS gl buffer lifecycle hits backend" {
