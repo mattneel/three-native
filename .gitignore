@@ -1,3 +1,17 @@
 .zig-cache/
 zig-out/
 docs/*/book/
+
+# mquickjs build artifacts
+deps/mquickjs/*.o
+deps/mquickjs/*.a
+deps/mquickjs/*.d
+deps/mquickjs/*_stdlib
+deps/mquickjs/*_stdlib.h
+deps/mquickjs/mquickjs_atom.h
+deps/mquickjs/mqjs
+deps/mquickjs/example
+
+# src build artifacts
+src/*.o
+src/*_gen

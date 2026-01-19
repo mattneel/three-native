@@ -49,11 +49,13 @@ Three.js touches these browser APIs:
 
 ## Getting Started
 
-```
+```bash
 git clone --recursive https://github.com/mattneel/three-native
 cd three-native
 zig build run
 ```
+
+Requires: Zig 0.15+, gcc, make
 
 ## Status
 

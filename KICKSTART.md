@@ -63,11 +63,11 @@ Three.js touches these browser APIs:
 
 ## Milestones
 
-### M0: Proof of Life
-- [ ] mquickjs compiles in Zig build
-- [ ] Call JS from Zig
-- [ ] Call Zig from JS
-- [ ] Print "hello from JS" 
+### M0: Proof of Life ✅
+- [x] mquickjs compiles in Zig build
+- [x] Call JS from Zig
+- [x] Call Zig from JS
+- [x] Print "hello from mquickjs" 
 
 ### M1: Triangle
 - [ ] sokol_gfx window opens
@@ -129,6 +129,10 @@ git clone --recursive https://github.com/mattneel/three-native
 cd three-native
 zig build run
 ```
+
+Requires: Zig 0.15+, gcc, make
+
+The build system orchestrates everything: mquickjs stdlib generation, C compilation, and Zig linking.
 
 ## Contributing
 
