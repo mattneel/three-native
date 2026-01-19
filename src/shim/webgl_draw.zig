@@ -151,6 +151,70 @@ pub fn drawElements(mode: u32, count: i32, index_type: u32, offset: u32, element
     g_state.command_count += 1;
 }
 
+fn validateCommand(
+    cmd: *const DrawCommand,
+    mgr: *const webgl_state.BufferManager,
+    programs: *webgl_program.ProgramTable,
+) !*const webgl_program.Program {
+    const prog = programs.get(cmd.program) orelse return error.InvalidProgram;
+    if (!prog.linked) return error.ProgramNotLinked;
+    if (!programs.ensureBackendShader(cmd.program)) return error.ShaderNotReady;
+    if (mapPrimitive(cmd.mode) == null) return error.InvalidPrimitive;
+
+    var slot_buffers: [MaxVertexBuffers]?webgl.BufferId = [_]?webgl.BufferId{null} ** MaxVertexBuffers;
+    var slot_strides: [MaxVertexBuffers]u32 = [_]u32{0} ** MaxVertexBuffers;
+    var slot_count: usize = 0;
+
+    for (cmd.attribs, 0..) |attrib, attr_index| {
+        _ = attr_index;
+        if (!attrib.enabled) continue;
+        const buf_id = attrib.buffer orelse return error.MissingVertexBuffer;
+        if (mapVertexFormat(attrib.size, attrib.gl_type, attrib.normalized) == null) {
+            return error.InvalidAttribFormat;
+        }
+
+        var slot: ?usize = null;
+        for (slot_buffers, 0..) |maybe_buf, sidx| {
+            if (maybe_buf != null and maybe_buf.? == buf_id) {
+                slot = sidx;
+                break;
+            }
+        }
+        if (slot == null) {
+            if (slot_count >= MaxVertexBuffers) return error.TooManyVertexBuffers;
+            slot = slot_count;
+            slot_buffers[slot_count] = buf_id;
+            slot_count += 1;
+        }
+        const slot_idx = slot.?;
+
+        var stride = attrib.stride;
+        if (stride == 0) {
+            const elem_size = typeSize(attrib.gl_type);
+            if (elem_size == 0) return error.InvalidStride;
+            stride = attrib.size * elem_size;
+        }
+        if (stride == 0) return error.InvalidStride;
+        if (slot_strides[slot_idx] == 0) {
+            slot_strides[slot_idx] = stride;
+        } else if (slot_strides[slot_idx] != stride) {
+            return error.InconsistentStride;
+        }
+
+        const buf = mgr.buffers.get(buf_id) orelse return error.InvalidBuffer;
+        if (buf.backend == 0) return error.BufferNotReady;
+    }
+
+    if (cmd.kind == .elements) {
+        if (mapIndexType(cmd.index_type) == null) return error.InvalidIndexType;
+        const eid = cmd.element_buffer orelse return error.MissingIndexBuffer;
+        const buf = mgr.buffers.get(eid) orelse return error.InvalidBuffer;
+        if (buf.backend == 0) return error.BufferNotReady;
+    }
+
+    return prog;
+}
+
 pub fn flush() void {
     if (g_state.command_count == 0) return;
     defer g_state.command_count = 0;
@@ -160,9 +224,9 @@ pub fn flush() void {
     const programs = webgl_program.globalProgramTable();
 
     for (g_state.commands[0..g_state.command_count]) |cmd| {
-        const prog = programs.get(cmd.program) orelse continue;
-        if (!prog.linked) continue;
-        if (!programs.ensureBackendShader(cmd.program)) continue;
+        const prog = validateCommand(&cmd, mgr, programs) catch {
+            continue;
+        };
 
         var pip_desc = sg.PipelineDesc{};
         pip_desc.shader = prog.backend_shader;

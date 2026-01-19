@@ -17,6 +17,7 @@ pub const MaxAttrNameBytes: usize = 64;
 pub const MaxUniformNameBytes: usize = 64;
 pub const MaxUniformBlockBytes: usize = MaxProgramUniforms * 64;
 pub const MaxUniformArrayCount: u16 = 16;
+pub const MaxProgramSamplers: usize = 12;
 
 pub const ProgramId = packed struct(u32) {
     index: u16,
@@ -40,6 +41,20 @@ const UniformBlock = struct {
     buffer: [MaxUniformBlockBytes]u8,
 };
 
+const SamplerKind = enum {
+    sampler2d,
+    samplerCube,
+};
+
+const SamplerEntry = struct {
+    name_len: u8,
+    name_bytes: [MaxUniformNameBytes]u8,
+    kind: SamplerKind,
+    stage: UniformStage,
+    array_count: u16,
+    units: [MaxUniformArrayCount]i32,
+};
+
 pub const Program = struct {
     id: ProgramId,
     linked: bool,
@@ -57,6 +72,8 @@ pub const Program = struct {
     attr_names: [MaxProgramAttrs][MaxAttrNameBytes]u8,
     vs_uniforms: UniformBlock,
     fs_uniforms: UniformBlock,
+    sampler_count: u8,
+    samplers: [MaxProgramSamplers]SamplerEntry,
     link_version: u32,
 };
 
@@ -75,6 +92,17 @@ fn emptyUniformBlock() UniformBlock {
         .count = 0,
         .items = [_]UniformEntry{empty_entry} ** MaxProgramUniforms,
         .buffer = [_]u8{0} ** MaxUniformBlockBytes,
+    };
+}
+
+fn emptySamplerEntry() SamplerEntry {
+    return .{
+        .name_len = 0,
+        .name_bytes = [_]u8{0} ** MaxUniformNameBytes,
+        .kind = .sampler2d,
+        .stage = .vertex,
+        .array_count = 1,
+        .units = [_]i32{0} ** MaxUniformArrayCount,
     };
 }
 
@@ -120,6 +148,8 @@ pub const ProgramTable = struct {
                     .attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs,
                     .vs_uniforms = emptyUniformBlock(),
                     .fs_uniforms = emptyUniformBlock(),
+                    .sampler_count = 0,
+                    .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
                     .link_version = 0,
                 },
             };
@@ -156,6 +186,8 @@ pub const ProgramTable = struct {
                     .attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs,
                     .vs_uniforms = emptyUniformBlock(),
                     .fs_uniforms = emptyUniformBlock(),
+                    .sampler_count = 0,
+                    .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
                     .link_version = 0,
                 };
                 entry.active = true;
@@ -228,6 +260,8 @@ pub const ProgramTable = struct {
 
         var vs_uniforms: [MaxProgramUniforms]UniformDecl = undefined;
         var vs_uniform_count: u8 = 0;
+        var vs_samplers: [MaxProgramSamplers]SamplerDecl = undefined;
+        var vs_sampler_count: u8 = 0;
         var vs_block_size: u32 = 0;
         var vs_len: u32 = 0;
         translateEsToGl330(
@@ -237,6 +271,8 @@ pub const ProgramTable = struct {
             &vs_len,
             &vs_uniforms,
             &vs_uniform_count,
+            &vs_samplers,
+            &vs_sampler_count,
             &vs_block_size,
         ) catch {
             try self.setInfoLog(entry, "vertex shader translate failed");
@@ -246,6 +282,8 @@ pub const ProgramTable = struct {
 
         var fs_uniforms: [MaxProgramUniforms]UniformDecl = undefined;
         var fs_uniform_count: u8 = 0;
+        var fs_samplers: [MaxProgramSamplers]SamplerDecl = undefined;
+        var fs_sampler_count: u8 = 0;
         var fs_block_size: u32 = 0;
         var fs_len: u32 = 0;
         translateEsToGl330(
@@ -255,6 +293,8 @@ pub const ProgramTable = struct {
             &fs_len,
             &fs_uniforms,
             &fs_uniform_count,
+            &fs_samplers,
+            &fs_sampler_count,
             &fs_block_size,
         ) catch {
             try self.setInfoLog(entry, "fragment shader translate failed");
@@ -270,6 +310,17 @@ pub const ProgramTable = struct {
         const fs_count: usize = @intCast(fs_uniform_count);
         self.storeUniforms(entry, .fragment, fs_uniforms[0..fs_count], fs_block_size) catch {
             try self.setInfoLog(entry, "fragment uniforms rejected");
+            return;
+        };
+
+        const vs_sampler_count_usize: usize = @intCast(vs_sampler_count);
+        self.storeSamplers(entry, .vertex, vs_samplers[0..vs_sampler_count_usize]) catch {
+            try self.setInfoLog(entry, "vertex samplers rejected");
+            return;
+        };
+        const fs_sampler_count_usize: usize = @intCast(fs_sampler_count);
+        self.storeSamplers(entry, .fragment, fs_samplers[0..fs_sampler_count_usize]) catch {
+            try self.setInfoLog(entry, "fragment samplers rejected");
             return;
         };
         const vs_len_usize: usize = @intCast(vs_len);
@@ -320,10 +371,14 @@ pub const ProgramTable = struct {
     pub fn getUniformLocation(self: *Self, id: ProgramId, name: []const u8) !i32 {
         const prog = self.get(id) orelse return error.InvalidHandle;
         if (findUniform(&prog.vs_uniforms, name)) |idx| {
-            return @intCast(encodeUniformLocation(.vertex, idx));
+            return @intCast(encodeUniformLocation(.block, .vertex, idx));
         }
         if (findUniform(&prog.fs_uniforms, name)) |idx| {
-            return @intCast(encodeUniformLocation(.fragment, idx));
+            return @intCast(encodeUniformLocation(.block, .fragment, idx));
+        }
+        if (findSampler(prog, name)) |idx| {
+            const sampler = prog.samplers[@as(usize, idx)];
+            return @intCast(encodeUniformLocation(.sampler, sampler.stage, idx));
         }
         return -1;
     }
@@ -331,6 +386,7 @@ pub const ProgramTable = struct {
     pub fn setUniformFloats(self: *Self, id: ProgramId, loc: u32, values: []const f32) !void {
         const entry = self.get(id) orelse return error.InvalidHandle;
         const info = decodeUniformLocation(loc);
+        if (info.kind != .block) return error.InvalidLocation;
         const block = if (info.stage == .vertex) &entry.vs_uniforms else &entry.fs_uniforms;
         if (info.index >= block.count) return error.InvalidLocation;
         const uniform = block.items[@as(usize, info.index)];
@@ -342,6 +398,9 @@ pub const ProgramTable = struct {
     pub fn setUniformInts(self: *Self, id: ProgramId, loc: u32, values: []const i32) !void {
         const entry = self.get(id) orelse return error.InvalidHandle;
         const info = decodeUniformLocation(loc);
+        if (info.kind == .sampler) {
+            return setSamplerUnits(entry, info.index, values);
+        }
         const block = if (info.stage == .vertex) &entry.vs_uniforms else &entry.fs_uniforms;
         if (info.index >= block.count) return error.InvalidLocation;
         const uniform = block.items[@as(usize, info.index)];
@@ -394,6 +453,8 @@ pub const ProgramTable = struct {
             .attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs,
             .vs_uniforms = emptyUniformBlock(),
             .fs_uniforms = emptyUniformBlock(),
+            .sampler_count = 0,
+            .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
             .link_version = 0,
         };
         self.count -= 1;
@@ -447,6 +508,8 @@ pub const ProgramTable = struct {
         entry.program.attr_name_lens = [_]u8{0} ** MaxProgramAttrs;
         entry.program.attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs;
         entry.program.attr_count = 0;
+        entry.program.sampler_count = 0;
+        entry.program.samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers;
         self.clearUniforms(entry);
     }
 
@@ -504,6 +567,24 @@ pub const ProgramTable = struct {
         }
     }
 
+    fn storeSamplers(self: *Self, entry: *Entry, stage: UniformStage, decls: []SamplerDecl) !void {
+        _ = self;
+        if (decls.len == 0) return;
+        for (decls) |decl| {
+            if (entry.program.sampler_count >= MaxProgramSamplers) return error.TooManySamplers;
+            if (decl.name.len >= MaxUniformNameBytes) return error.UniformNameTooLong;
+            const index: usize = @intCast(entry.program.sampler_count);
+            entry.program.samplers[index] = emptySamplerEntry();
+            entry.program.samplers[index].kind = decl.kind;
+            entry.program.samplers[index].stage = stage;
+            entry.program.samplers[index].array_count = decl.array_count;
+            entry.program.samplers[index].name_len = @intCast(decl.name.len);
+            @memcpy(entry.program.samplers[index].name_bytes[0..decl.name.len], decl.name);
+            entry.program.samplers[index].name_bytes[decl.name.len] = 0;
+            entry.program.sampler_count += 1;
+        }
+    }
+
     fn buildShaderDesc(entry: *Entry) sg.ShaderDesc {
         var desc = sg.ShaderDesc{};
         if (entry.program.vertex_source_len > 0) {
@@ -540,19 +621,25 @@ fn applyUniformBlock(desc: *sg.ShaderDesc, index: usize, stage: sg.ShaderStage, 
     }
 }
 
+const UniformLocationKind = enum(u8) { block = 0, sampler = 1 };
+
 const UniformLocation = struct {
+    kind: UniformLocationKind,
     stage: UniformStage,
     index: u8,
 };
 
-fn encodeUniformLocation(stage: UniformStage, index: u8) u32 {
-    return (@as(u32, @intFromEnum(stage)) << 8) | index;
+fn encodeUniformLocation(kind: UniformLocationKind, stage: UniformStage, index: u8) u32 {
+    return (@as(u32, @intFromEnum(kind)) << 9) | (@as(u32, @intFromEnum(stage)) << 8) | index;
 }
 
 fn decodeUniformLocation(loc: u32) UniformLocation {
+    const kind_bit: u8 = @intCast((loc >> 9) & 0x1);
     const stage_bit: u8 = @intCast((loc >> 8) & 0x1);
     const stage: UniformStage = if (stage_bit == 1) .fragment else .vertex;
+    const kind: UniformLocationKind = if (kind_bit == 1) .sampler else .block;
     return .{
+        .kind = kind,
         .stage = stage,
         .index = @intCast(loc & 0xff),
     };
@@ -568,6 +655,23 @@ fn findUniform(block: *const UniformBlock, name: []const u8) ?u8 {
         if (idx >= @as(usize, block.count)) break;
         if (item.name_len == 0) continue;
         const slice = item.name_bytes[0..@as(usize, item.name_len)];
+        if (std.mem.eql(u8, slice, query)) {
+            return @intCast(idx);
+        }
+    }
+    return null;
+}
+
+fn findSampler(prog: *const Program, name: []const u8) ?u8 {
+    if (prog.sampler_count == 0) return null;
+    var query = name;
+    if (std.mem.indexOfScalar(u8, query, '[')) |idx| {
+        query = query[0..idx];
+    }
+    for (prog.samplers, 0..) |sampler, idx| {
+        if (idx >= @as(usize, prog.sampler_count)) break;
+        if (sampler.name_len == 0) continue;
+        const slice = sampler.name_bytes[0..@as(usize, sampler.name_len)];
         if (std.mem.eql(u8, slice, query)) {
             return @intCast(idx);
         }
@@ -628,6 +732,16 @@ fn writeUniformInts(uniform: UniformEntry, buffer: []u8, values: []const i32) !v
     }
 }
 
+fn setSamplerUnits(entry: *Program, index: u8, values: []const i32) !void {
+    if (index >= entry.sampler_count) return error.InvalidLocation;
+    const sampler = &entry.samplers[@as(usize, index)];
+    const count: usize = if (sampler.array_count == 0) 1 else sampler.array_count;
+    if (values.len < count) return error.NotEnoughData;
+    for (0..count) |i| {
+        sampler.units[i] = values[i];
+    }
+}
+
 const ShaderStage = enum { vertex, fragment };
 
 const UniformStage = enum(u8) { vertex = 0, fragment = 1 };
@@ -641,6 +755,17 @@ const UniformDecl = struct {
     size: u32,
 };
 
+const SamplerDecl = struct {
+    name: []const u8,
+    kind: SamplerKind,
+    array_count: u16,
+};
+
+const UniformParse = union(enum) {
+    block: UniformDecl,
+    sampler: SamplerDecl,
+};
+
 const MaxShaderLineBytes: usize = 1024;
 
 fn translateEsToGl330(
@@ -650,10 +775,13 @@ fn translateEsToGl330(
     out_len: *u32,
     uniforms: *[MaxProgramUniforms]UniformDecl,
     uniform_count: *u8,
+    samplers: *[MaxProgramSamplers]SamplerDecl,
+    sampler_count: *u8,
     block_size: *u32,
 ) !void {
     if (source.len > shader.MaxShaderSourceBytes) return error.TooLarge;
     uniform_count.* = 0;
+    sampler_count.* = 0;
     block_size.* = 0;
 
     var body_buf: [MaxTranslatedShaderBytes]u8 = undefined;
@@ -666,11 +794,21 @@ fn translateEsToGl330(
         if (std.mem.startsWith(u8, trimmed, "#version")) continue;
         if (std.mem.startsWith(u8, trimmed, "precision")) continue;
 
-        if (try parseUniformDecl(trimmed)) |decl| {
-            const count: usize = @intCast(uniform_count.*);
-            if (count >= MaxProgramUniforms) return error.TooManyUniforms;
-            uniforms[count] = decl;
-            uniform_count.* += 1;
+        if (try parseUniformDecl(trimmed)) |parsed| {
+            switch (parsed) {
+                .block => |decl| {
+                    const count: usize = @intCast(uniform_count.*);
+                    if (count >= MaxProgramUniforms) return error.TooManyUniforms;
+                    uniforms[count] = decl;
+                    uniform_count.* += 1;
+                },
+                .sampler => |decl| {
+                    const count: usize = @intCast(sampler_count.*);
+                    if (count >= MaxProgramSamplers) return error.TooManySamplers;
+                    samplers[count] = decl;
+                    sampler_count.* += 1;
+                },
+            }
             continue;
         }
 
@@ -722,6 +860,22 @@ fn translateEsToGl330(
         try appendBytes(header_buf[0..], &header_len, "};\n");
     }
 
+    if (sampler_count.* > 0) {
+        const count: usize = @intCast(sampler_count.*);
+        for (samplers[0..count]) |s| {
+            try appendBytes(header_buf[0..], &header_len, "uniform ");
+            try appendBytes(header_buf[0..], &header_len, samplerGlslType(s.kind));
+            try appendBytes(header_buf[0..], &header_len, " ");
+            try appendBytes(header_buf[0..], &header_len, s.name);
+            if (s.array_count > 1) {
+                var buf: [16]u8 = undefined;
+                const len = try std.fmt.bufPrint(&buf, "[{}]", .{s.array_count});
+                try appendBytes(header_buf[0..], &header_len, len);
+            }
+            try appendBytes(header_buf[0..], &header_len, ";\n");
+        }
+    }
+
     var total_len: usize = 0;
     try appendBytes(out[0..], &total_len, header_buf[0..header_len]);
     try appendBytes(out[0..], &total_len, body_buf[0..body_len]);
@@ -730,7 +884,7 @@ fn translateEsToGl330(
     out_len.* = @intCast(total_len);
 }
 
-fn parseUniformDecl(line: []const u8) !?UniformDecl {
+fn parseUniformDecl(line: []const u8) !?UniformParse {
     if (!std.mem.startsWith(u8, line, "uniform ")) return null;
     const rest = line["uniform ".len..];
     var tokens = std.mem.tokenizeAny(u8, rest, " \t");
@@ -739,16 +893,23 @@ fn parseUniformDecl(line: []const u8) !?UniformDecl {
     const type_token = precision;
     const name_token = tokens.next() orelse return null;
     const parsed = parseUniformName(name_token) orelse return null;
-    const utype = uniformTypeFromGlsl(type_token) orelse return null;
     if (parsed.count > MaxUniformArrayCount) return error.UniformArrayTooLarge;
-    return .{
+    if (samplerKindFromGlsl(type_token)) |kind| {
+        return .{ .sampler = .{
+            .name = parsed.name,
+            .kind = kind,
+            .array_count = parsed.count,
+        } };
+    }
+    const utype = uniformTypeFromGlsl(type_token) orelse return null;
+    return .{ .block = .{
         .name = parsed.name,
         .utype = utype,
         .array_count = parsed.count,
         .offset = 0,
         .stride = 0,
         .size = 0,
-    };
+    } };
 }
 
 const UniformName = struct {
@@ -787,6 +948,12 @@ fn uniformTypeFromGlsl(token: []const u8) ?sg.UniformType {
     return null;
 }
 
+fn samplerKindFromGlsl(token: []const u8) ?SamplerKind {
+    if (std.mem.eql(u8, token, "sampler2D")) return .sampler2d;
+    if (std.mem.eql(u8, token, "samplerCube")) return .samplerCube;
+    return null;
+}
+
 fn glslType(utype: sg.UniformType) []const u8 {
     return switch (utype) {
         .FLOAT => "float",
@@ -799,6 +966,13 @@ fn glslType(utype: sg.UniformType) []const u8 {
         .INT4 => "ivec4",
         .MAT4 => "mat4",
         else => "float",
+    };
+}
+
+fn samplerGlslType(kind: SamplerKind) []const u8 {
+    return switch (kind) {
+        .sampler2d => "sampler2D",
+        .samplerCube => "samplerCube",
     };
 }
 
@@ -1042,4 +1216,52 @@ test "ProgramTable uniforms store data" {
     const prog = programs.get(pid) orelse return error.UnexpectedNull;
     const buf = prog.vs_uniforms.buffer[0..64];
     try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(data[0..]), buf);
+}
+
+test "ProgramTable tracks sampler uniforms" {
+    const shaders = shader.globalShaderTable();
+    shaders.reset();
+    defer shaders.reset();
+    const programs = globalProgramTable();
+    programs.reset();
+    defer programs.reset();
+
+    const vs = try shaders.alloc(.vertex);
+    try shaders.setSource(vs,
+        \\attribute vec3 position;
+        \\void main() {
+        \\  gl_Position = vec4(position, 1.0);
+        \\}
+    );
+    try shaders.compile(vs);
+
+    const fs = try shaders.alloc(.fragment);
+    try shaders.setSource(fs,
+        \\precision mediump float;
+        \\uniform sampler2D u_tex;
+        \\void main() {
+        \\  gl_FragColor = vec4(1.0);
+        \\}
+    );
+    try shaders.compile(fs);
+
+    const pid = try programs.alloc();
+    try programs.attachShader(pid, vs, shaders);
+    try programs.attachShader(pid, fs, shaders);
+    try programs.link(pid, shaders);
+
+    const prog = programs.get(pid) orelse return error.UnexpectedNull;
+    try testing.expectEqual(@as(u8, 1), prog.sampler_count);
+    const sampler = prog.samplers[0];
+    const sampler_name = sampler.name_bytes[0..@as(usize, sampler.name_len)];
+    try testing.expectEqualStrings("u_tex", sampler_name);
+
+    const loc = try programs.getUniformLocation(pid, "u_tex");
+    try testing.expect(loc >= 0);
+    try programs.setUniformInts(pid, @intCast(loc), &[_]i32{2});
+    try testing.expectEqual(@as(i32, 2), prog.samplers[0].units[0]);
+
+    const fs_len: usize = @intCast(prog.fragment_source_len);
+    const fs_src = prog.fragment_source[0..fs_len];
+    try testing.expect(std.mem.indexOf(u8, fs_src, "uniform sampler2D u_tex") != null);
 }

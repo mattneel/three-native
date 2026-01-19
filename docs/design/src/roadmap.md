@@ -261,6 +261,7 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [x] Compilation error reporting
 - [x] Program linking
 - [x] Shader translation bounded (no heap, line caps)
+- [x] Sampler uniform parsing + locations
 
 **Tests Required**
 - [x] Valid shader compiles
@@ -286,7 +287,7 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [x] Assemble sokol pipeline from GL state
 - [x] Execute draw with current bindings
 - [x] Uniform buffer management
-- [ ] State validation before draw
+- [x] State validation before draw
 - [x] Pipeline cache avoids per-draw create/destroy
 - [x] Uniform std140 padding zeroed on upload
 - [x] Uniform typed arrays use aligned staging copy
