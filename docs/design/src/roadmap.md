@@ -173,14 +173,14 @@ Verdict: ✓ Negligible vs 16.6ms budget
 ### Phase 2.0: Design Validation
 
 **Goals**
-- [ ] WebGL API surface mapped
+- [x] WebGL API surface mapped
 - [ ] Shim architecture documented
 - [ ] State machine design complete
 
 **Deliverables**
 - [x] `src/shim/webgl.zig` - type definitions (context handle table)
 - [x] `src/shim/webgl_state.zig` - state machine types (buffer binds)
-- [ ] API coverage spreadsheet (which gl.* calls needed)
+- [x] API coverage spreadsheet (which gl.* calls needed)
 
 **Exit Criteria**
 - [ ] Know exactly which 30-40 GL calls to implement

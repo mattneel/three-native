@@ -4,6 +4,7 @@
 - [Architecture](architecture.md)
 - [Runtime](runtime.md)
 - [Browser Shim](shim.md)
+- [WebGL API Coverage](webgl-api-coverage.md)
 - [Platform and Rendering](platform.md)
 - [Assets and IO](assets.md)
 - [Memory and Concurrency](memory-concurrency.md)
