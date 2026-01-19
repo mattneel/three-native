@@ -130,9 +130,9 @@ cd three-native
 zig build run
 ```
 
-Requires: Zig 0.15+, gcc, make
+Requires: Zig 0.15+ (that's it - builds anywhere Zig builds)
 
-The build system orchestrates everything: mquickjs stdlib generation, C compilation, and Zig linking.
+The build system orchestrates everything: mquickjs stdlib generation, C compilation, and Zig linking - all using Zig's built-in C compiler for full cross-platform portability.
 
 ## Contributing
 

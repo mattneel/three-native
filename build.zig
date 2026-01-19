@@ -6,48 +6,67 @@ pub fn build(b: *std.Build) void {
 
     const mquickjs_path = b.path("deps/mquickjs");
 
-    // Step 1: Generate mquickjs stdlib headers (requires running host tools)
-    const gen_stdlib = b.addSystemCommand(&.{
-        "make", "-C", "deps/mquickjs", "example_stdlib.h", "mquickjs_atom.h",
-    });
+    // mquickjs requires generated headers. We build generators and capture their output.
 
-    // Step 2: Build mquickjs as static library using system compiler
-    // We use gcc because mquickjs relies on specific alignment behavior
-    const build_mquickjs = b.addSystemCommand(&.{
-        "make", "-C", "deps/mquickjs", "example",
+    // Build example_stdlib generator (includes mquickjs_build.c)
+    const example_stdlib_gen = b.addExecutable(.{
+        .name = "example_stdlib_gen",
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+        }),
     });
-    build_mquickjs.step.dependOn(&gen_stdlib.step);
+    example_stdlib_gen.addCSourceFiles(.{
+        .root = mquickjs_path,
+        .files = &.{ "example_stdlib.c", "mquickjs_build.c" },
+        .flags = &.{"-D_GNU_SOURCE"},
+    });
+    example_stdlib_gen.addIncludePath(mquickjs_path);
+    example_stdlib_gen.linkLibC();
 
-    // Step 3: Create the static library archive
-    const create_archive = b.addSystemCommand(&.{
-        "ar", "rcs", "deps/mquickjs/libmquickjs.a",
-        "deps/mquickjs/mquickjs.o",
-        "deps/mquickjs/dtoa.o",
-        "deps/mquickjs/libm.o",
-        "deps/mquickjs/cutils.o",
-    });
-    create_archive.step.dependOn(&build_mquickjs.step);
+    // Run example_stdlib to generate example_stdlib.h
+    const gen_example_stdlib = b.addRunArtifact(example_stdlib_gen);
+    const example_stdlib_h = gen_example_stdlib.captureStdOut();
 
-    // Step 4: Compile our JS runtime wrapper
-    const compile_runtime = b.addSystemCommand(&.{
-        "gcc", "-Wall", "-g", "-D_GNU_SOURCE", "-fno-math-errno", "-fno-trapping-math", "-Os",
-        "-I", "deps/mquickjs",
-        "-c", "-o", "src/js_runtime.o",
-        "src/js_runtime.c",
+    // Build mqjs_stdlib generator (for atom table)
+    const mqjs_stdlib_gen = b.addExecutable(.{
+        .name = "mqjs_stdlib_gen",
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+        }),
     });
-    compile_runtime.step.dependOn(&build_mquickjs.step);
+    mqjs_stdlib_gen.addCSourceFiles(.{
+        .root = mquickjs_path,
+        .files = &.{ "mqjs_stdlib.c", "mquickjs_build.c" },
+        .flags = &.{"-D_GNU_SOURCE"},
+    });
+    mqjs_stdlib_gen.addIncludePath(mquickjs_path);
+    mqjs_stdlib_gen.linkLibC();
 
-    // Step 5: Add runtime to archive
-    const add_runtime = b.addSystemCommand(&.{
-        "ar", "rcs", "deps/mquickjs/libmquickjs.a",
-        "deps/mquickjs/mquickjs.o",
-        "deps/mquickjs/dtoa.o",
-        "deps/mquickjs/libm.o",
-        "deps/mquickjs/cutils.o",
-        "src/js_runtime.o",
-    });
-    add_runtime.step.dependOn(&create_archive.step);
-    add_runtime.step.dependOn(&compile_runtime.step);
+    // Run mqjs_stdlib -a to generate mquickjs_atom.h
+    const gen_atom_h = b.addRunArtifact(mqjs_stdlib_gen);
+    gen_atom_h.addArg("-a");
+    const mquickjs_atom_h = gen_atom_h.captureStdOut();
+
+    // Write generated headers to a generated directory
+    const generated = b.addWriteFiles();
+    _ = generated.addCopyFile(example_stdlib_h, "example_stdlib.h");
+    _ = generated.addCopyFile(mquickjs_atom_h, "mquickjs_atom.h");
+    const generated_include = generated.getDirectory();
+
+    // C flags for mquickjs compilation
+    // Note: mquickjs uses pointer arithmetic patterns that trigger Zig's UB sanitizer
+    // but are valid in practice. We disable the sanitizers for mquickjs code.
+    const c_flags = &[_][]const u8{
+        "-D_GNU_SOURCE",
+        "-fno-math-errno",
+        "-fno-trapping-math",
+        "-fno-strict-aliasing",
+        "-fwrapv",
+        "-fno-sanitize=undefined",
+        "-fno-sanitize=null",
+    };
 
     // Create module for Zig code
     const mod = b.addModule("three_native", .{
@@ -68,14 +87,29 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Link pre-built mquickjs static library
-    exe.addObjectFile(b.path("deps/mquickjs/libmquickjs.a"));
-    exe.addIncludePath(mquickjs_path);
-    exe.linkLibC();
-    exe.linkSystemLibrary("m");
+    // Add mquickjs C sources
+    exe.addCSourceFiles(.{
+        .root = mquickjs_path,
+        .files = &.{
+            "mquickjs.c",
+            "dtoa.c",
+            "libm.c",
+            "cutils.c",
+        },
+        .flags = c_flags,
+    });
 
-    // Make exe depend on the library build
-    exe.step.dependOn(&add_runtime.step);
+    // Add our JS runtime wrapper
+    exe.addCSourceFiles(.{
+        .files = &.{"src/js_runtime.c"},
+        .flags = c_flags,
+    });
+
+    // Include paths: generated headers first, then mquickjs source
+    exe.addIncludePath(generated_include);
+    exe.addIncludePath(mquickjs_path);
+    exe.addIncludePath(b.path("src"));
+    exe.linkLibC();
 
     b.installArtifact(exe);
 
@@ -102,15 +136,4 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
-
-    // Clean step
-    const clean_step = b.step("clean", "Clean build artifacts");
-    const clean_cmd = b.addSystemCommand(&.{
-        "make", "-C", "deps/mquickjs", "clean",
-    });
-    const clean_runtime = b.addSystemCommand(&.{
-        "rm", "-f", "src/js_runtime.o",
-    });
-    clean_step.dependOn(&clean_cmd.step);
-    clean_step.dependOn(&clean_runtime.step);
 }

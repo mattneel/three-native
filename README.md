@@ -55,7 +55,7 @@ cd three-native
 zig build run
 ```
 
-Requires: Zig 0.15+, gcc, make
+Requires: Zig 0.15+ (that's it - no external C compiler needed)
 
 ## Status
 
