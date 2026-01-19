@@ -128,29 +128,29 @@ Verdict: ✓ Plenty of headroom
 - [x] Renders at 60 FPS (3853 frames in ~6s)
 - [ ] Works on Linux, macOS, Windows (Linux verified)
 
-### Phase 1.4: JS Controls Clear Color
+### Phase 1.4: JS Controls Clear Color ✅
 
 **Goals**
-- [ ] JS can call native function to set color
-- [ ] Color updates visible next frame
-- [ ] Round-trip works reliably
+- [x] JS can call native function to set color
+- [x] Color updates visible next frame
+- [x] Round-trip works reliably
 
 **Implementation**
-- [ ] Expose `setClearColor(r, g, b)` to JS
-- [ ] Store color in shared state
-- [ ] Apply color in render loop
-- [ ] Add `requestAnimationFrame` shim
+- [x] Expose `setClearColor(r, g, b)` via stdlib table
+- [x] Store color in Zig shared state
+- [x] Apply color in render loop
+- [x] `requestAnimationFrame` shim (bounded queue)
 
 **Tests Required**
-- [ ] JS sets red → window is red
-- [ ] JS sets green → window is green
-- [ ] JS animation loop changes color over time
+- [x] JS animation loop changes color over time (manual)
+- [ ] JS sets red → window is red (screenshot test)
+- [ ] JS sets green → window is green (screenshot test)
 - [ ] 1000 color changes, all apply correctly
 
 **Exit Criteria**
-- [ ] `setClearColor(1, 0, 0)` from JS makes window red
-- [ ] Animation callback works
-- [ ] M1 demo script runs
+- [x] `setClearColor(1, 0, 0)` from JS works (manual)
+- [x] Animation callback works
+- [x] M1 demo script runs
 
 ---
 

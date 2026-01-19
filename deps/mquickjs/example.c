@@ -1,18 +1,46 @@
 /*
- * JS runtime wrapper for three-native
- * Uses mquickjs example stdlib as base
+ * Micro QuickJS C API example
+ *
+ * Copyright (c) 2017-2025 Fabrice Bellard
+ * Copyright (c) 2017-2025 Charlie Gordon
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
  */
-#include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <inttypes.h>
 #include <string.h>
+#include <assert.h>
+#include <ctype.h>
 #include <time.h>
 #include <sys/time.h>
+#include <math.h>
+#include <fcntl.h>
 
 #include "cutils.h"
 #include "mquickjs.h"
 
 #define JS_CLASS_RECTANGLE (JS_CLASS_USER + 0)
 #define JS_CLASS_FILLED_RECTANGLE (JS_CLASS_USER + 1)
+/* total number of classes */
 #define JS_CLASS_COUNT (JS_CLASS_USER + 2)
 
 #define JS_CFUNCTION_rectangle_closure_test (JS_CFUNCTION_USER + 0)
@@ -80,21 +108,23 @@ static JSValue js_rectangle_closure_test(JSContext *ctx, JSValue *this_val, int 
     return params;
 }
 
+/* C closure test */
 static JSValue js_rectangle_getClosure(JSContext *ctx, JSValue *this_val, int argc,
                                     JSValue *argv)
 {
     return JS_NewCFunctionParams(ctx, JS_CFUNCTION_rectangle_closure_test, argv[0]);
 }
 
+/* example to call a JS function. parameters: function to call, parameter */
 static JSValue js_rectangle_call(JSContext *ctx, JSValue *this_val, int argc,
                                  JSValue *argv)
 {
     if (JS_StackCheck(ctx, 3))
         return JS_EXCEPTION;
-    JS_PushArg(ctx, argv[1]);
-    JS_PushArg(ctx, argv[0]);
-    JS_PushArg(ctx, JS_NULL);
-    return JS_Call(ctx, 1);
+    JS_PushArg(ctx, argv[1]); /* parameter */
+    JS_PushArg(ctx, argv[0]); /* func name */
+    JS_PushArg(ctx, JS_NULL); /* this */
+    return JS_Call(ctx, 1); /* single parameter */
 }
 
 static JSValue js_filled_rectangle_constructor(JSContext *ctx, JSValue *this_val, int argc,
@@ -158,7 +188,6 @@ static JSValue js_print(JSContext *ctx, JSValue *this_val, int argc, JSValue *ar
         }
     }
     putchar('\n');
-    fflush(stdout);
     return JS_UNDEFINED;
 }
 
@@ -190,7 +219,6 @@ static JSValue js_performance_now(JSContext *ctx, JSValue *this_val, int argc, J
     return JS_NewInt64(ctx, get_time_ms());
 }
 
-/* Include the generated stdlib from mquickjs example */
 #include "example_stdlib.h"
 
 static void js_log_func(void *opaque, const void *buf, size_t buf_len)
@@ -198,51 +226,62 @@ static void js_log_func(void *opaque, const void *buf, size_t buf_len)
     fwrite(buf, 1, buf_len, stdout);
 }
 
-/* Public API for Zig */
-typedef struct {
+static uint8_t *load_file(const char *filename, int *plen)
+{
+    FILE *f;
+    uint8_t *buf;
+    int buf_len;
+
+    f = fopen(filename, "rb");
+    if (!f) {
+        perror(filename);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    buf_len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = malloc(buf_len + 1);
+    fread(buf, 1, buf_len, f);
+    buf[buf_len] = '\0';
+    fclose(f);
+    if (plen)
+        *plen = buf_len;
+    return buf;
+}
+
+int main(int argc, const char **argv)
+{
+    size_t mem_size;
+    int buf_len;
+    uint8_t *mem_buf, *buf;
     JSContext *ctx;
-    void *mem_buf;
-} JSRuntime;
-
-JSRuntime *js_runtime_new(size_t mem_size)
-{
-    JSRuntime *rt = malloc(sizeof(JSRuntime));
-    if (!rt) return NULL;
+    const char *filename;
+    JSValue val;
     
-    rt->mem_buf = malloc(mem_size);
-    if (!rt->mem_buf) {
-        free(rt);
-        return NULL;
+    if (argc < 2) {
+        printf("usage: example script.js\n");
+        exit(1);
     }
-    
-    rt->ctx = JS_NewContext(rt->mem_buf, mem_size, &js_stdlib);
-    if (!rt->ctx) {
-        free(rt->mem_buf);
-        free(rt);
-        return NULL;
-    }
-    
-    JS_SetLogFunc(rt->ctx, js_log_func);
-    return rt;
-}
 
-void js_runtime_free(JSRuntime *rt)
-{
-    if (rt) {
-        if (rt->ctx) JS_FreeContext(rt->ctx);
-        if (rt->mem_buf) free(rt->mem_buf);
-        free(rt);
-    }
-}
+    filename = argv[1];
 
-int js_runtime_eval(JSRuntime *rt, const char *code, size_t len, const char *filename)
-{
-    JSValue val = JS_Eval(rt->ctx, code, len, filename, 0);
+    mem_size = 65536;
+    mem_buf = malloc(mem_size);
+    ctx = JS_NewContext(mem_buf, mem_size, &js_stdlib);
+    JS_SetLogFunc(ctx, js_log_func);
+    
+    buf = load_file(filename, &buf_len);
+    val = JS_Eval(ctx, (const char *)buf, buf_len, filename, 0);
+    free(buf);
     if (JS_IsException(val)) {
-        JSValue obj = JS_GetException(rt->ctx);
-        JS_PrintValueF(rt->ctx, obj, JS_DUMP_LONG);
+        JSValue obj;
+        obj = JS_GetException(ctx);
+        JS_PrintValueF(ctx, obj, JS_DUMP_LONG);
         printf("\n");
-        return -1;
+        exit(1);
     }
+    
+    JS_FreeContext(ctx);
+    free(mem_buf);
     return 0;
 }

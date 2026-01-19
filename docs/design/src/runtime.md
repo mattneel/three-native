@@ -4,6 +4,10 @@ The runtime embeds `mquickjs` as the JavaScript engine. A single JS context is
 created and kept for the lifetime of the app. All shim APIs are exposed as
 host bindings registered on startup.
 
+The stdlib table is generated from `mqjs_stdlib.c`, while the actual host
+functions (`js_*`) are implemented in Zig and exported to C. This keeps the
+runtime glue in Zig without a C wrapper layer.
+
 ## Execution Model
 
 - One JS runtime and one primary context.

@@ -69,11 +69,11 @@ Three.js touches these browser APIs:
 - [x] Call Zig from JS
 - [x] Print "hello from mquickjs" 
 
-### M1: Triangle (In Progress)
+### M1: Triangle ✅
 - [x] sokol dependency added, types defined (Phase 1.0)
 - [x] sokol_gfx window opens (Phase 1.1)
 - [x] Hardcoded triangle renders (Phase 1.3)
-- [ ] JS controls clear color (Phase 1.4)
+- [x] JS controls clear color (Phase 1.4)
 
 ### M2: Cube via Shim
 - [ ] WebGLRenderingContext shim (subset)

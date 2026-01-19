@@ -6,65 +6,6 @@ pub fn build(b: *std.Build) void {
 
     const mquickjs_path = b.path("deps/mquickjs");
 
-    // ==========================================================================
-    // Sokol dependency
-    // ==========================================================================
-    const sokol_dep = b.dependency("sokol", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // ==========================================================================
-    // mquickjs header generation
-    // ==========================================================================
-
-    // Build example_stdlib generator (includes mquickjs_build.c)
-    const example_stdlib_gen = b.addExecutable(.{
-        .name = "example_stdlib_gen",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = .ReleaseFast,
-        }),
-    });
-    example_stdlib_gen.addCSourceFiles(.{
-        .root = mquickjs_path,
-        .files = &.{ "example_stdlib.c", "mquickjs_build.c" },
-        .flags = &.{"-D_GNU_SOURCE"},
-    });
-    example_stdlib_gen.addIncludePath(mquickjs_path);
-    example_stdlib_gen.linkLibC();
-
-    // Run example_stdlib to generate example_stdlib.h
-    const gen_example_stdlib = b.addRunArtifact(example_stdlib_gen);
-    const example_stdlib_h = gen_example_stdlib.captureStdOut();
-
-    // Build mqjs_stdlib generator (for atom table)
-    const mqjs_stdlib_gen = b.addExecutable(.{
-        .name = "mqjs_stdlib_gen",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = .ReleaseFast,
-        }),
-    });
-    mqjs_stdlib_gen.addCSourceFiles(.{
-        .root = mquickjs_path,
-        .files = &.{ "mqjs_stdlib.c", "mquickjs_build.c" },
-        .flags = &.{"-D_GNU_SOURCE"},
-    });
-    mqjs_stdlib_gen.addIncludePath(mquickjs_path);
-    mqjs_stdlib_gen.linkLibC();
-
-    // Run mqjs_stdlib -a to generate mquickjs_atom.h
-    const gen_atom_h = b.addRunArtifact(mqjs_stdlib_gen);
-    gen_atom_h.addArg("-a");
-    const mquickjs_atom_h = gen_atom_h.captureStdOut();
-
-    // Write generated headers to a generated directory
-    const generated = b.addWriteFiles();
-    _ = generated.addCopyFile(example_stdlib_h, "example_stdlib.h");
-    _ = generated.addCopyFile(mquickjs_atom_h, "mquickjs_atom.h");
-    const generated_include = generated.getDirectory();
-
     // C flags for mquickjs compilation
     // Note: mquickjs uses pointer arithmetic patterns that trigger Zig's UB sanitizer
     // but are valid in practice. We disable the sanitizers for mquickjs code.
@@ -79,6 +20,81 @@ pub fn build(b: *std.Build) void {
     };
 
     // ==========================================================================
+    // Sokol dependency
+    // ==========================================================================
+    const sokol_dep = b.dependency("sokol", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ==========================================================================
+    // mquickjs header generation
+    // ==========================================================================
+
+    // Build mqjs_stdlib generator (includes mquickjs_build.c)
+    const mqjs_stdlib_gen = b.addExecutable(.{
+        .name = "mqjs_stdlib_gen",
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    mqjs_stdlib_gen.addCSourceFiles(.{
+        .root = mquickjs_path,
+        .files = &.{ "mqjs_stdlib.c", "mquickjs_build.c" },
+        .flags = c_flags,
+    });
+    mqjs_stdlib_gen.addIncludePath(mquickjs_path);
+    mqjs_stdlib_gen.linkLibC();
+
+    // Run mqjs_stdlib to generate mqjs_stdlib.h
+    const gen_mqjs_stdlib = b.addRunArtifact(mqjs_stdlib_gen);
+    const mqjs_stdlib_h = gen_mqjs_stdlib.captureStdOut();
+
+    // Run mqjs_stdlib -a to generate mquickjs_atom.h
+    const gen_atom_h = b.addRunArtifact(mqjs_stdlib_gen);
+    gen_atom_h.addArg("-a");
+    const mquickjs_atom_h = gen_atom_h.captureStdOut();
+
+    // Write generated headers to a generated directory
+    const generated = b.addWriteFiles();
+    _ = generated.addCopyFile(mqjs_stdlib_h, "mqjs_stdlib.h");
+    _ = generated.addCopyFile(mquickjs_atom_h, "mquickjs_atom.h");
+    const generated_include = generated.getDirectory();
+
+    // ==========================================================================
+    // mquickjs library (C sources compiled once)
+    // ==========================================================================
+    const mquickjs_lib_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const mquickjs_lib = b.addLibrary(.{
+        .name = "mquickjs",
+        .linkage = .static,
+        .root_module = mquickjs_lib_mod,
+    });
+    mquickjs_lib.addCSourceFiles(.{
+        .root = mquickjs_path,
+        .files = &.{
+            "mquickjs.c",
+            "dtoa.c",
+            "libm.c",
+            "cutils.c",
+        },
+        .flags = c_flags,
+    });
+    mquickjs_lib.addCSourceFiles(.{
+        .files = &.{"src/runtime/mqjs_stdlib.c"},
+        .flags = c_flags,
+    });
+    mquickjs_lib.addIncludePath(generated_include);
+    mquickjs_lib.addIncludePath(mquickjs_path);
+    mquickjs_lib.addIncludePath(b.path("src/runtime"));
+    mquickjs_lib.linkLibC();
+
+    // ==========================================================================
     // Library module (for tests and reuse)
     // ==========================================================================
     const mod = b.addModule("three_native", .{
@@ -90,6 +106,11 @@ pub fn build(b: *std.Build) void {
         },
     });
     mod.linkLibrary(sokol_dep.artifact("sokol_clib"));
+
+    // Add mquickjs include paths to module for @cImport
+    mod.addIncludePath(generated_include);
+    mod.addIncludePath(mquickjs_path);
+    mod.addIncludePath(b.path("src/runtime"));
 
     // ==========================================================================
     // Main executable
@@ -107,29 +128,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add mquickjs C sources
-    exe.addCSourceFiles(.{
-        .root = mquickjs_path,
-        .files = &.{
-            "mquickjs.c",
-            "dtoa.c",
-            "libm.c",
-            "cutils.c",
-        },
-        .flags = c_flags,
-    });
-
-    // Add our JS runtime wrapper
-    exe.addCSourceFiles(.{
-        .files = &.{"src/js_runtime.c"},
-        .flags = c_flags,
-    });
-
-    // Include paths: generated headers first, then mquickjs source
-    exe.addIncludePath(generated_include);
-    exe.addIncludePath(mquickjs_path);
-    exe.addIncludePath(b.path("src"));
-    exe.linkLibC();
+    exe.linkLibrary(mquickjs_lib);
 
     // Link sokol
     exe.root_module.linkLibrary(sokol_dep.artifact("sokol_clib"));
@@ -154,6 +153,8 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
+    mod_tests.linkLibrary(mquickjs_lib);
+
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const test_step = b.step("test", "Run tests");

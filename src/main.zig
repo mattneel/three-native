@@ -1,40 +1,49 @@
 const std = @import("std");
 const three_native = @import("three_native");
 const window = three_native.window;
+const JsRuntime = three_native.JsRuntime;
 
-// JS runtime (will be integrated with window loop in later phases)
-extern fn js_runtime_new(mem_size: usize) ?*anyopaque;
-extern fn js_runtime_free(rt: ?*anyopaque) void;
-extern fn js_runtime_eval(rt: ?*anyopaque, code: [*]const u8, len: usize, filename: [*:0]const u8) c_int;
-
-var g_js_rt: ?*anyopaque = null;
-var g_time: f64 = 0;
+var g_js_rt: ?*JsRuntime = null;
+var g_time_ms: f64 = 0;
 
 fn onFrame(delta: f64) void {
-    g_time += delta;
+    g_time_ms += delta * 1000.0;
 
-    // Slowly cycle background color (darker so triangle is visible)
-    const r: f32 = @floatCast(0.1 + 0.1 * @sin(g_time * 0.5));
-    const g: f32 = @floatCast(0.1 + 0.1 * @sin(g_time * 0.5 + 2.0));
-    const b: f32 = @floatCast(0.2 + 0.1 * @sin(g_time * 0.5 + 4.0));
-    window.setClearColor(window.ClearColor.rgb(r, g, b));
+    if (g_js_rt) |rt| {
+        rt.tick(g_time_ms);
+        const shared = rt.getSharedState();
+        window.setClearColor(window.ClearColor.rgb(
+            shared.clear_color[0],
+            shared.clear_color[1],
+            shared.clear_color[2],
+        ));
+    }
 }
 
 pub fn main() !void {
-    // Initialize JS runtime
-    g_js_rt = js_runtime_new(64 * 1024) orelse {
-        std.debug.print("Failed to create JS runtime\n", .{});
-        return error.RuntimeInitFailed;
-    };
-    defer js_runtime_free(g_js_rt);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    // Print hello from JS
-    const code = "print('hello from mquickjs')";
-    const result = js_runtime_eval(g_js_rt, code.ptr, code.len, "main");
-    if (result != 0) {
-        std.debug.print("JS evaluation failed\n", .{});
-        return error.EvalFailed;
-    }
+    // Initialize JS runtime (pure Zig bindings)
+    var runtime = try JsRuntime.init(allocator, 64 * 1024);
+    defer runtime.deinit();
+    runtime.makeCurrent();
+    g_js_rt = &runtime;
+
+    // Run initialization script
+    try runtime.eval(
+        \\print('hello from mquickjs (Zig stdlib bindings)');
+        \\function animate(ts) {
+        \\  var t = ts * 0.001;
+        \\  var r = 0.4 + 0.4 * Math.sin(t);
+        \\  var g = 0.3 + 0.3 * Math.sin(t + 2.0);
+        \\  var b = 0.5 + 0.3 * Math.sin(t + 4.0);
+        \\  setClearColor(r, g, b);
+        \\  requestAnimationFrame(animate);
+        \\}
+        \\requestAnimationFrame(animate);
+    , "init");
 
     // Set up frame callback
     window.setFrameCallback(onFrame);
