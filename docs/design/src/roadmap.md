@@ -224,6 +224,9 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [x] Bind state tracking
 - [x] Buffer data tracking (size + update count)
 - [x] Native buffer API (create/bind/data/delete)
+- [x] JS buffer API surface (gl.createBuffer/bindBuffer/bufferData/deleteBuffer)
+- [x] TypedArray/ArrayBuffer support for gl.bufferData
+- [x] Element array buffers handled (usage set on first data)
 - [x] Sokol buffer backend adapter (not wired to JS yet)
 - [x] Data upload path wired to sokol (backend set in window init)
 - [x] Cleanup on delete (handle + bind state)
@@ -242,14 +245,16 @@ Verdict: ✓ Negligible vs 16.6ms budget
 ### Phase 2.3: Shader Compilation
 
 **Goals**
-- [ ] createShader works
-- [ ] shaderSource works
-- [ ] compileShader works
-- [ ] getShaderParameter works
+- [x] createShader works
+- [x] shaderSource works
+- [x] compileShader works
+- [x] getShaderParameter works
 - [ ] createProgram, attachShader, linkProgram work
 
 **Implementation**
-- [ ] Shader source storage
+- [x] Shader handle allocation
+- [x] Shader source storage
+- [x] Compile status + info log tracking
 - [ ] GLSL to sokol shader translation (or passthrough)
 - [ ] Compilation error reporting
 - [ ] Program linking
@@ -259,7 +264,7 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [ ] Invalid shader reports error
 - [ ] Program links with valid shaders
 - [ ] Program fails with incompatible shaders
-- [ ] getShaderInfoLog returns errors
+- [x] getShaderInfoLog returns errors
 
 **Exit Criteria**
 - [ ] Shader pipeline works

@@ -326,6 +326,28 @@ static const JSPropDef js_performance[] = {
 static const JSClassDef js_performance_obj =
     JS_OBJECT_DEF("Performance", js_performance);
 
+static const JSPropDef js_gl[] = {
+    JS_CFUNC_DEF("createBuffer", 0, js_gl_createBuffer),
+    JS_CFUNC_DEF("deleteBuffer", 1, js_gl_deleteBuffer),
+    JS_CFUNC_DEF("bindBuffer", 2, js_gl_bindBuffer),
+    JS_CFUNC_DEF("bufferData", 2, js_gl_bufferData),
+    JS_CFUNC_DEF("createShader", 1, js_gl_createShader),
+    JS_CFUNC_DEF("deleteShader", 1, js_gl_deleteShader),
+    JS_CFUNC_DEF("shaderSource", 2, js_gl_shaderSource),
+    JS_CFUNC_DEF("compileShader", 1, js_gl_compileShader),
+    JS_CFUNC_DEF("getShaderParameter", 2, js_gl_getShaderParameter),
+    JS_CFUNC_DEF("getShaderInfoLog", 1, js_gl_getShaderInfoLog),
+    JS_PROP_DOUBLE_DEF("ARRAY_BUFFER", 34962, 0 ),
+    JS_PROP_DOUBLE_DEF("ELEMENT_ARRAY_BUFFER", 34963, 0 ),
+    JS_PROP_DOUBLE_DEF("VERTEX_SHADER", 35633, 0 ),
+    JS_PROP_DOUBLE_DEF("FRAGMENT_SHADER", 35632, 0 ),
+    JS_PROP_DOUBLE_DEF("COMPILE_STATUS", 35713, 0 ),
+    JS_PROP_END,
+};
+
+static const JSClassDef js_gl_obj =
+    JS_OBJECT_DEF("WebGLContext", js_gl);
+
 static const JSPropDef js_global_object[] = {
     JS_PROP_CLASS_DEF("Object", &js_object_class),
     JS_PROP_CLASS_DEF("Function", &js_function_class),
@@ -372,6 +394,7 @@ static const JSPropDef js_global_object[] = {
 
     JS_PROP_CLASS_DEF("console", &js_console_obj),
     JS_PROP_CLASS_DEF("performance", &js_performance_obj),
+    JS_PROP_CLASS_DEF("gl", &js_gl_obj),
     JS_CFUNC_DEF("print", 1, js_print),
     JS_CFUNC_DEF("setClearColor", 3, js_setClearColor),
     JS_CFUNC_DEF("requestAnimationFrame", 1, js_requestAnimationFrame),

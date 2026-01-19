@@ -4,6 +4,9 @@
 //! are implemented in Zig and provided through the stdlib table.
 
 const std = @import("std");
+const webgl_state = @import("../shim/webgl_state.zig");
+const webgl = @import("../shim/webgl.zig");
+const webgl_shader = @import("../shim/webgl_shader.zig");
 
 const c = @cImport({
     @cInclude("mquickjs_bindings.h");
@@ -177,6 +180,44 @@ fn throwTypeError(ctx: *c.JSContext, msg: [:0]const u8) c.JSValue {
 
 fn throwInternalError(ctx: *c.JSContext, msg: [:0]const u8) c.JSValue {
     return c.JS_Throw(ctx, c.JS_NewString(ctx, msg.ptr));
+}
+
+const GL_ARRAY_BUFFER: u32 = 34962;
+const GL_ELEMENT_ARRAY_BUFFER: u32 = 34963;
+const GL_VERTEX_SHADER: u32 = 35633;
+const GL_FRAGMENT_SHADER: u32 = 35632;
+const GL_COMPILE_STATUS: u32 = 35713;
+
+fn bufferIdToU32(id: webgl.BufferId) u32 {
+    return @bitCast(id);
+}
+
+fn bufferIdFromU32(value: u32) webgl.BufferId {
+    return @bitCast(value);
+}
+
+fn shaderIdToU32(id: webgl_shader.ShaderId) u32 {
+    return @bitCast(id);
+}
+
+fn shaderIdFromU32(value: u32) webgl_shader.ShaderId {
+    return @bitCast(value);
+}
+
+fn parseBufferTarget(target: u32) !webgl_state.BufferTarget {
+    return switch (target) {
+        GL_ARRAY_BUFFER => .array,
+        GL_ELEMENT_ARRAY_BUFFER => .element_array,
+        else => error.InvalidTarget,
+    };
+}
+
+fn parseShaderKind(kind: u32) !webgl_shader.ShaderKind {
+    return switch (kind) {
+        GL_VERTEX_SHADER => .vertex,
+        GL_FRAGMENT_SHADER => .fragment,
+        else => error.InvalidShaderType,
+    };
 }
 
 fn logFunc(_: ?*anyopaque, buf: ?*const anyopaque, len: usize) callconv(.c) void {
@@ -367,6 +408,229 @@ export fn js_cancelAnimationFrame(ctx: *c.JSContext, _: *c.JSValue, argc: c_int,
     return c.JS_UNDEFINED;
 }
 
+export fn js_gl_createBuffer(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    const mgr = webgl_state.globalBufferManager();
+    const id = mgr.createBuffer(.{ .usage = .vertex }) catch {
+        return throwInternalError(ctx, "createBuffer failed");
+    };
+    return c.JS_NewUint32(ctx, bufferIdToU32(id));
+}
+
+export fn js_gl_deleteBuffer(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    if (argv[0] == c.JS_NULL or argv[0] == c.JS_UNDEFINED) {
+        return c.JS_UNDEFINED;
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const mgr = webgl_state.globalBufferManager();
+    _ = mgr.deleteBuffer(bufferIdFromU32(raw));
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_bindBuffer(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) {
+        return throwTypeError(ctx, "bindBuffer requires (target, buffer)");
+    }
+    var target_raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target_raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const target = parseBufferTarget(target_raw) catch {
+        return throwTypeError(ctx, "invalid buffer target");
+    };
+
+    const mgr = webgl_state.globalBufferManager();
+    if (argv[1] == c.JS_NULL or argv[1] == c.JS_UNDEFINED) {
+        mgr.unbindBuffer(target);
+        return c.JS_UNDEFINED;
+    }
+
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[1]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    mgr.bindBuffer(target, bufferIdFromU32(raw)) catch {
+        return throwTypeError(ctx, "invalid buffer handle");
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_bufferData(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) {
+        return throwTypeError(ctx, "bufferData requires (target, size)");
+    }
+    var target_raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target_raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const target = parseBufferTarget(target_raw) catch {
+        return throwTypeError(ctx, "invalid buffer target");
+    };
+
+    const mgr = webgl_state.globalBufferManager();
+    var c_ptr: [*c]u8 = null;
+    var len: usize = 0;
+
+    if (c.JS_GetTypedArrayData(ctx, argv[1], &c_ptr, &len) == 0) {
+        const data = @as([*]u8, @ptrCast(c_ptr))[0..len];
+        mgr.bufferData(target, data) catch {
+            return throwTypeError(ctx, "bufferData failed");
+        };
+        return c.JS_UNDEFINED;
+    }
+    if (c.JS_GetArrayBufferData(ctx, argv[1], &c_ptr, &len) == 0) {
+        const data = @as([*]u8, @ptrCast(c_ptr))[0..len];
+        mgr.bufferData(target, data) catch {
+            return throwTypeError(ctx, "bufferData failed");
+        };
+        return c.JS_UNDEFINED;
+    }
+
+    var size: u32 = 0;
+    if (c.JS_ToUint32(ctx, &size, argv[1]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    if (size > webgl.MaxBufferBytes) {
+        return throwTypeError(ctx, "bufferData too large");
+    }
+
+    if (size == 0) {
+        mgr.bufferData(target, &.{}) catch {
+            return throwTypeError(ctx, "bufferData failed");
+        };
+        return c.JS_UNDEFINED;
+    }
+
+    const data = std.heap.page_allocator.alloc(u8, size) catch {
+        return throwInternalError(ctx, "out of memory");
+    };
+    defer std.heap.page_allocator.free(data);
+    @memset(data, 0);
+
+    mgr.bufferData(target, data) catch {
+        return throwTypeError(ctx, "bufferData failed");
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_createShader(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) {
+        return throwTypeError(ctx, "createShader requires a type");
+    }
+    var kind_raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &kind_raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const kind = parseShaderKind(kind_raw) catch {
+        return throwTypeError(ctx, "invalid shader type");
+    };
+    const table = webgl_shader.globalShaderTable();
+    const id = table.alloc(kind) catch {
+        return throwInternalError(ctx, "createShader failed");
+    };
+    return c.JS_NewUint32(ctx, shaderIdToU32(id));
+}
+
+export fn js_gl_deleteShader(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    if (argv[0] == c.JS_NULL or argv[0] == c.JS_UNDEFINED) {
+        return c.JS_UNDEFINED;
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const table = webgl_shader.globalShaderTable();
+    _ = table.free(shaderIdFromU32(raw));
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_shaderSource(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) {
+        return throwTypeError(ctx, "shaderSource requires (shader, source)");
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    if (c.JS_IsString(ctx, argv[1]) == 0) {
+        return throwTypeError(ctx, "shaderSource requires a string");
+    }
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[1], &buf);
+    if (c_str == null) {
+        return c.JS_EXCEPTION;
+    }
+    const slice: [*]const u8 = @ptrCast(c_str);
+    const table = webgl_shader.globalShaderTable();
+    table.setSource(shaderIdFromU32(raw), slice[0..len]) catch |err| switch (err) {
+        error.InvalidHandle => return throwTypeError(ctx, "invalid shader handle"),
+        error.TooLarge => return throwTypeError(ctx, "shaderSource too large"),
+        else => return throwInternalError(ctx, "shaderSource failed"),
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_compileShader(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) {
+        return throwTypeError(ctx, "compileShader requires a shader");
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const table = webgl_shader.globalShaderTable();
+    table.compile(shaderIdFromU32(raw)) catch |err| switch (err) {
+        error.InvalidHandle => return throwTypeError(ctx, "invalid shader handle"),
+        else => return throwInternalError(ctx, "compileShader failed"),
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_getShaderParameter(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) {
+        return throwTypeError(ctx, "getShaderParameter requires (shader, pname)");
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    var pname: u32 = 0;
+    if (c.JS_ToUint32(ctx, &pname, argv[1]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    if (pname != GL_COMPILE_STATUS) {
+        return throwTypeError(ctx, "invalid shader parameter");
+    }
+    const table = webgl_shader.globalShaderTable();
+    const sh = table.get(shaderIdFromU32(raw)) orelse {
+        return throwTypeError(ctx, "invalid shader handle");
+    };
+    return if (sh.compiled) c.JS_TRUE else c.JS_FALSE;
+}
+
+export fn js_gl_getShaderInfoLog(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) {
+        return throwTypeError(ctx, "getShaderInfoLog requires a shader");
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const table = webgl_shader.globalShaderTable();
+    const sh = table.get(shaderIdFromU32(raw)) orelse {
+        return throwTypeError(ctx, "invalid shader handle");
+    };
+    if (sh.info_log) |log| {
+        return c.JS_NewStringLen(ctx, @ptrCast(log.ptr), log.len);
+    }
+    return c.JS_NewStringLen(ctx, "", 0);
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -401,4 +665,207 @@ test "requestAnimationFrame schedules and fires" {
 
     const called = try rt.evalInt("raf_called", "test");
     try testing.expectEqual(@as(i32, 1), called);
+}
+
+test "JS gl buffer lifecycle hits backend" {
+    const BackendStub = struct {
+        create_calls: u32 = 0,
+        update_calls: u32 = 0,
+        destroy_calls: u32 = 0,
+        next_handle: webgl.BufferBackend.Handle = 1,
+
+        const Self = @This();
+
+        fn create(ctx: ?*anyopaque, size: usize, usage: webgl.BufferUsage) webgl.BufferBackend.Handle {
+            _ = size;
+            _ = usage;
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.create_calls += 1;
+            const h = self.next_handle;
+            self.next_handle += 1;
+            return h;
+        }
+
+        fn update(ctx: ?*anyopaque, handle: webgl.BufferBackend.Handle, data: []const u8) void {
+            _ = handle;
+            _ = data;
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.update_calls += 1;
+        }
+
+        fn destroy(ctx: ?*anyopaque, handle: webgl.BufferBackend.Handle) void {
+            _ = handle;
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.destroy_calls += 1;
+        }
+    };
+
+    var stub = BackendStub{};
+    const backend = webgl.BufferBackend{
+        .ctx = &stub,
+        .create = BackendStub.create,
+        .update = BackendStub.update,
+        .destroy = BackendStub.destroy,
+    };
+
+    const mgr = webgl_state.globalBufferManager();
+    mgr.reset();
+    defer mgr.reset();
+    mgr.setBackend(&backend);
+
+    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.eval(
+        \\var b = gl.createBuffer();
+        \\gl.bindBuffer(gl.ARRAY_BUFFER, b);
+        \\gl.bufferData(gl.ARRAY_BUFFER, 16);
+        \\gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        \\gl.deleteBuffer(b);
+    , "test");
+
+    try testing.expectEqual(@as(u32, 1), stub.create_calls);
+    try testing.expectEqual(@as(u32, 1), stub.update_calls);
+    try testing.expectEqual(@as(u32, 1), stub.destroy_calls);
+    try testing.expectEqual(@as(u16, 0), mgr.buffers.count);
+}
+
+test "JS gl bufferData accepts typed arrays" {
+    const BackendStub = struct {
+        update_calls: u32 = 0,
+        last_len: usize = 0,
+
+        const Self = @This();
+
+        fn create(ctx: ?*anyopaque, size: usize, usage: webgl.BufferUsage) webgl.BufferBackend.Handle {
+            _ = size;
+            _ = usage;
+            _ = ctx;
+            return 1;
+        }
+
+        fn update(ctx: ?*anyopaque, handle: webgl.BufferBackend.Handle, data: []const u8) void {
+            _ = handle;
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.update_calls += 1;
+            self.last_len = data.len;
+        }
+
+        fn destroy(ctx: ?*anyopaque, handle: webgl.BufferBackend.Handle) void {
+            _ = ctx;
+            _ = handle;
+        }
+    };
+
+    var stub = BackendStub{};
+    const backend = webgl.BufferBackend{
+        .ctx = &stub,
+        .create = BackendStub.create,
+        .update = BackendStub.update,
+        .destroy = BackendStub.destroy,
+    };
+
+    const mgr = webgl_state.globalBufferManager();
+    mgr.reset();
+    defer mgr.reset();
+    mgr.setBackend(&backend);
+
+    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.eval(
+        \\var b = gl.createBuffer();
+        \\gl.bindBuffer(gl.ARRAY_BUFFER, b);
+        \\var arr = new Uint8Array(4);
+        \\gl.bufferData(gl.ARRAY_BUFFER, arr);
+    , "test");
+
+    try testing.expectEqual(@as(u32, 1), stub.update_calls);
+    try testing.expectEqual(@as(usize, 4), stub.last_len);
+
+    try rt.eval(
+        \\var ab = new ArrayBuffer(12);
+        \\gl.bufferData(gl.ARRAY_BUFFER, ab);
+    , "test");
+
+    try testing.expectEqual(@as(u32, 2), stub.update_calls);
+    try testing.expectEqual(@as(usize, 12), stub.last_len);
+}
+
+test "JS element array buffer sets index usage" {
+    const mgr = webgl_state.globalBufferManager();
+    mgr.reset();
+    defer mgr.reset();
+
+    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.eval(
+        \\var b = gl.createBuffer();
+        \\gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b);
+        \\gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(6));
+    , "test");
+
+    const id_raw = try rt.evalInt("b", "test");
+    const id: webgl.BufferId = bufferIdFromU32(@intCast(id_raw));
+    const buf = mgr.buffers.get(id) orelse return error.UnexpectedNull;
+    try testing.expectEqual(webgl.BufferUsage.index, buf.usage);
+    try testing.expectEqual(@as(u32, 12), buf.data_len);
+}
+
+test "JS gl shaderSource stores source" {
+    const table = webgl_shader.globalShaderTable();
+    table.reset();
+    defer table.reset();
+
+    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    const src = "void main() {}";
+    try rt.eval(
+        \\var s = gl.createShader(gl.VERTEX_SHADER);
+        \\gl.shaderSource(s, "void main() {}");
+    , "test");
+
+    const id_raw = try rt.evalInt("s", "test");
+    const id: webgl_shader.ShaderId = shaderIdFromU32(@intCast(id_raw));
+    const sh = table.get(id) orelse return error.UnexpectedNull;
+    try testing.expectEqual(webgl_shader.ShaderKind.vertex, sh.kind);
+    try testing.expectEqual(@as(u32, src.len), sh.source_len);
+    const stored = sh.source orelse return error.UnexpectedNull;
+    try testing.expectEqualSlices(u8, src, stored);
+}
+
+test "JS gl compileShader updates status and info log" {
+    const table = webgl_shader.globalShaderTable();
+    table.reset();
+    defer table.reset();
+
+    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.eval(
+        \\var s = gl.createShader(gl.VERTEX_SHADER);
+        \\gl.compileShader(s);
+        \\var status0 = gl.getShaderParameter(s, gl.COMPILE_STATUS) ? 1 : 0;
+        \\var log0 = gl.getShaderInfoLog(s).length;
+        \\gl.shaderSource(s, "void main() {}");
+        \\gl.compileShader(s);
+        \\var status1 = gl.getShaderParameter(s, gl.COMPILE_STATUS) ? 1 : 0;
+        \\var log1 = gl.getShaderInfoLog(s).length;
+    , "test");
+
+    const status0 = try rt.evalInt("status0", "test");
+    const log0 = try rt.evalInt("log0", "test");
+    const status1 = try rt.evalInt("status1", "test");
+    const log1 = try rt.evalInt("log1", "test");
+    try testing.expectEqual(@as(i32, 0), status0);
+    try testing.expect(log0 > 0);
+    try testing.expectEqual(@as(i32, 1), status1);
+    try testing.expectEqual(@as(i32, 0), log1);
 }

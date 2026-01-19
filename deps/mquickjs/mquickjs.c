@@ -1137,6 +1137,92 @@ void *JS_GetOpaque(JSContext *ctx, JSValue val)
     return p->u.user.opaque;
 }
 
+int JS_GetArrayBufferData(JSContext *ctx, JSValue val, uint8_t **pdata, size_t *plen)
+{
+    JSObject *p;
+    JSByteArray *arr;
+
+    if (!JS_IsPtr(val)) {
+        return -1;
+    }
+    p = JS_VALUE_TO_PTR(val);
+    if (p->mtag != JS_MTAG_OBJECT || p->class_id != JS_CLASS_ARRAY_BUFFER) {
+        return -1;
+    }
+
+    arr = JS_VALUE_TO_PTR(p->u.array_buffer.byte_buffer);
+    if (!arr) {
+        return -1;
+    }
+    if (pdata)
+        *pdata = arr->buf;
+    if (plen)
+        *plen = arr->size;
+    return 0;
+}
+
+static int js_get_typed_array_bpe(int class_id)
+{
+    switch (class_id) {
+    case JS_CLASS_UINT8C_ARRAY:
+    case JS_CLASS_INT8_ARRAY:
+    case JS_CLASS_UINT8_ARRAY:
+        return 1;
+    case JS_CLASS_INT16_ARRAY:
+    case JS_CLASS_UINT16_ARRAY:
+        return 2;
+    case JS_CLASS_INT32_ARRAY:
+    case JS_CLASS_UINT32_ARRAY:
+    case JS_CLASS_FLOAT32_ARRAY:
+        return 4;
+    case JS_CLASS_FLOAT64_ARRAY:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+int JS_GetTypedArrayData(JSContext *ctx, JSValue val, uint8_t **pdata, size_t *plen)
+{
+    JSObject *p, *pbuffer;
+    JSByteArray *arr;
+    int bpe;
+    size_t offset, len;
+
+    if (!JS_IsPtr(val)) {
+        return -1;
+    }
+    p = JS_VALUE_TO_PTR(val);
+    if (p->mtag != JS_MTAG_OBJECT) {
+        return -1;
+    }
+    bpe = js_get_typed_array_bpe(p->class_id);
+    if (bpe == 0) {
+        return -1;
+    }
+
+    pbuffer = JS_VALUE_TO_PTR(p->u.typed_array.buffer);
+    if (!pbuffer) {
+        return -1;
+    }
+    arr = JS_VALUE_TO_PTR(pbuffer->u.array_buffer.byte_buffer);
+    if (!arr) {
+        return -1;
+    }
+
+    offset = (size_t)p->u.typed_array.offset * (size_t)bpe;
+    len = (size_t)p->u.typed_array.len * (size_t)bpe;
+    if (offset + len > (size_t)arr->size) {
+        return -1;
+    }
+
+    if (pdata)
+        *pdata = arr->buf + offset;
+    if (plen)
+        *plen = len;
+    return 0;
+}
+
 static JSObject *js_get_object_class(JSContext *ctx, JSValue val, int class_id)
 {
     if (!JS_IsPtr(val)) {

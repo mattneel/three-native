@@ -54,9 +54,18 @@ pub const BindState = struct {
         };
 
         const buf = table.get(id) orelse return error.InvalidHandle;
-        switch (target) {
-            .array => if (buf.usage == .index) return error.WrongTarget,
-            .element_array => if (buf.usage != .index) return error.WrongTarget,
+        const desired_usage: webgl.BufferUsage = switch (target) {
+            .array => .vertex,
+            .element_array => .index,
+        };
+        if (buf.update_count == 0 and buf.data_len == 0 and buf.backend == 0) {
+            if (buf.usage == .vertex and desired_usage == .index) {
+                buf.usage = .index;
+            } else if (buf.usage != desired_usage) {
+                return error.WrongTarget;
+            }
+        } else if (buf.usage != desired_usage) {
+            return error.WrongTarget;
         }
 
         if (backend) |b| {
@@ -216,9 +225,37 @@ test "BindState bufferData rejects wrong target" {
     var state = BindState{};
 
     const id = try table.alloc(.{ .usage = .index });
+    try state.bindBuffer(&table, .element_array, id);
     try state.bindBuffer(&table, .array, id);
     const data = [_]u8{0} ** 16;
     try testing.expectError(error.WrongTarget, state.bufferData(&table, .array, data[0..], null));
+}
+
+test "BindState bufferData assigns usage on first upload" {
+    var table = webgl.BufferTable.init();
+    var state = BindState{};
+
+    const id = try table.alloc(.{});
+    try state.bindBuffer(&table, .element_array, id);
+    const data = [_]u8{0} ** 12;
+    try state.bufferData(&table, .element_array, data[0..], null);
+
+    const buf = table.get(id) orelse return error.UnexpectedNull;
+    try testing.expectEqual(webgl.BufferUsage.index, buf.usage);
+    try testing.expectEqual(@as(u32, 12), buf.data_len);
+}
+
+test "BindState bufferData rejects target switch after upload" {
+    var table = webgl.BufferTable.init();
+    var state = BindState{};
+
+    const id = try table.alloc(.{});
+    try state.bindBuffer(&table, .array, id);
+    const data = [_]u8{0} ** 8;
+    try state.bufferData(&table, .array, data[0..], null);
+
+    try state.bindBuffer(&table, .element_array, id);
+    try testing.expectError(error.WrongTarget, state.bufferData(&table, .element_array, data[0..], null));
 }
 
 test "BindState bufferData rejects oversize" {
