@@ -1,7 +1,6 @@
 // three.js minimal scene example (from manual "Creating a scene")
 // Runs in three-native by loading the ES5 bundle.
 
-load("examples/es5-shim.js");
 load("examples/three.es5.js");
 
 var scene = new THREE.Scene();

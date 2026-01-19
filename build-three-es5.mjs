@@ -48,7 +48,9 @@ if (!result?.code) {
 
 const prelude =
   'var Symbol = typeof Symbol === "undefined" ? { iterator: "@@iterator", toStringTag: "@@toStringTag", toPrimitive: "@@toPrimitive" } : Symbol;\n';
-let output = prelude + result.code;
+const shimPath = resolve("examples/es5-shim.js");
+const shim = await fs.readFile(shimPath, "utf8");
+let output = prelude + shim + "\n" + result.code;
 // Normalize line endings to LF for consistent parsing.
 output = output.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 // Escape any non-ASCII characters that might slip through.
