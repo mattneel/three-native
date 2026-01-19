@@ -311,4 +311,4 @@ VERSION,constant,webgl1,missing,
 VERTEX_SHADER,constant,webgl1,implemented,
 VIEWPORT,constant,webgl1,missing,
 WAIT_FAILED,constant,webgl2,missing,
-ZERO,constant,webgl1,missing
+ZERO,constant,webgl1,missing,
