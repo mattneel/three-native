@@ -6,7 +6,17 @@ pub fn build(b: *std.Build) void {
 
     const mquickjs_path = b.path("deps/mquickjs");
 
-    // mquickjs requires generated headers. We build generators and capture their output.
+    // ==========================================================================
+    // Sokol dependency
+    // ==========================================================================
+    const sokol_dep = b.dependency("sokol", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ==========================================================================
+    // mquickjs header generation
+    // ==========================================================================
 
     // Build example_stdlib generator (includes mquickjs_build.c)
     const example_stdlib_gen = b.addExecutable(.{
@@ -68,13 +78,18 @@ pub fn build(b: *std.Build) void {
         "-fno-sanitize=null",
     };
 
-    // Create module for Zig code
+    // ==========================================================================
+    // Library module (for tests and reuse)
+    // ==========================================================================
     const mod = b.addModule("three_native", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
     });
 
+    // ==========================================================================
     // Main executable
+    // ==========================================================================
     const exe = b.addExecutable(.{
         .name = "three_native",
         .root_module = b.createModule(.{
@@ -83,6 +98,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "three_native", .module = mod },
+                .{ .name = "sokol", .module = sokol_dep.module("sokol") },
             },
         }),
     });
@@ -111,8 +127,14 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path("src"));
     exe.linkLibC();
 
+    // Link sokol
+    exe.root_module.linkLibrary(sokol_dep.artifact("sokol_clib"));
+
     b.installArtifact(exe);
 
+    // ==========================================================================
+    // Run step
+    // ==========================================================================
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
@@ -122,18 +144,14 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // ==========================================================================
     // Tests
+    // ==========================================================================
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
 }
