@@ -639,7 +639,18 @@ fn sanitizeScriptBytes(allocator: std.mem.Allocator, input: []const u8) !Sanitiz
     }
 
     if (!needs_copy) {
-        return .{ .bytes = input[start..], .owned = false };
+        const slice = input[start..];
+        if (!std.unicode.utf8ValidateSlice(slice)) {
+            var out = std.ArrayList(u8).empty;
+            errdefer out.deinit(allocator);
+            for (slice) |b| {
+                if (b == '\n' or b == '\t' or (b >= 0x20 and b <= 0x7E)) {
+                    try out.append(allocator, b);
+                }
+            }
+            return .{ .bytes = try out.toOwnedSlice(allocator), .owned = true };
+        }
+        return .{ .bytes = slice, .owned = false };
     }
 
     var out = std.ArrayList(u8).empty;
@@ -661,7 +672,19 @@ fn sanitizeScriptBytes(allocator: std.mem.Allocator, input: []const u8) !Sanitiz
         try out.append(allocator, b);
     }
 
-    return .{ .bytes = try out.toOwnedSlice(allocator), .owned = true };
+    var sanitized = SanitizedScript{ .bytes = try out.toOwnedSlice(allocator), .owned = true };
+    if (!std.unicode.utf8ValidateSlice(sanitized.bytes)) {
+        var ascii_out = std.ArrayList(u8).empty;
+        errdefer ascii_out.deinit(allocator);
+        for (sanitized.bytes) |b| {
+            if (b == '\n' or b == '\t' or (b >= 0x20 and b <= 0x7E)) {
+                try ascii_out.append(allocator, b);
+            }
+        }
+        allocator.free(sanitized.bytes);
+        sanitized.bytes = try ascii_out.toOwnedSlice(allocator);
+    }
+    return sanitized;
 }
 
 export fn js_load(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
