@@ -1,6 +1,8 @@
 .zig-cache/
 zig-out/
 docs/*/book/
+node_modules/
+examples/three.es5.js
 
 # mquickjs build artifacts
 deps/mquickjs/*.o

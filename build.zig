@@ -138,11 +138,22 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     // ==========================================================================
+    // Three.js ES5 bundle (esbuild + Babel)
+    // ==========================================================================
+    const npm_install = b.addSystemCommand(&.{ "npm", "install" });
+    const npm_build_es5 = b.addSystemCommand(&.{ "npm", "run", "build:three-es5" });
+    npm_build_es5.step.dependOn(&npm_install.step);
+
+    const es5_step = b.step("three-es5", "Build the Three.js ES5 bundle");
+    es5_step.dependOn(&npm_build_es5.step);
+
+    // ==========================================================================
     // Run step
     // ==========================================================================
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
+    run_step.dependOn(es5_step);
     run_cmd.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {

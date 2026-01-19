@@ -1,0 +1,20 @@
+.{
+    .name = .sokol,
+    .version = "0.1.0",
+    .fingerprint = 0xf9f6f48d2b47bda5,
+    .paths = .{
+        "src",
+        "build.zig",
+        "build.zig.zon",
+    },
+    .dependencies = .{
+        .emsdk = .{
+            .url = "git+https://github.com/emscripten-core/emsdk?ref=4.0.14#eff90ca04a3785f571a8095b3a42b63799cf384a",
+            .hash = "N-V-__8AAMGsDwC6L1OfDgzRF1zFI2t-CaR0sVhEm8pmrpxm",
+        },
+        .shdc = .{
+            .url = "git+https://github.com/floooh/sokol-tools-bin#87a6914bb5eab83f13b12db6dfd4c1333494d076",
+            .hash = "sokolshdc-0.1.0-r2KZDhCTcARkWp7-FHBGPghlpM9lLOxPaccqSdy5Cr-R",
+        },
+    },
+}

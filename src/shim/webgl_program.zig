@@ -11,7 +11,7 @@ const sg = sokol.gfx;
 pub const MaxPrograms: usize = 64;
 pub const MaxProgramInfoLogBytes: usize = 4 * 1024;
 pub const MaxProgramAttrs: usize = 16;
-pub const MaxProgramUniforms: usize = 16;
+pub const MaxProgramUniforms: usize = 128;
 pub const MaxTranslatedShaderBytes: usize = shader.MaxShaderSourceBytes + 4096;
 pub const MaxAttrNameBytes: usize = 64;
 pub const MaxUniformNameBytes: usize = 64;
@@ -258,12 +258,78 @@ pub const ProgramTable = struct {
             return;
         };
 
+        var vs_uniforms_pass1: [MaxProgramUniforms]UniformDecl = undefined;
+        var vs_uniform_count_pass1: u8 = 0;
+        var vs_samplers_pass1: [MaxProgramSamplers]SamplerDecl = undefined;
+        var vs_sampler_count_pass1: u8 = 0;
+        var vs_block_size_pass1: u32 = 0;
+        var vs_len: u32 = 0;
+        translateEsToGl330(
+            vs_source,
+            .vertex,
+            &entry.program.vertex_source,
+            &vs_len,
+            &vs_uniforms_pass1,
+            &vs_uniform_count_pass1,
+            &vs_samplers_pass1,
+            &vs_sampler_count_pass1,
+            &vs_block_size_pass1,
+            null,
+        ) catch {
+            try self.setInfoLog(entry, "vertex shader translate failed");
+            return;
+        };
+
+        var fs_uniforms_pass1: [MaxProgramUniforms]UniformDecl = undefined;
+        var fs_uniform_count_pass1: u8 = 0;
+        var fs_samplers_pass1: [MaxProgramSamplers]SamplerDecl = undefined;
+        var fs_sampler_count_pass1: u8 = 0;
+        var fs_block_size_pass1: u32 = 0;
+        var fs_len: u32 = 0;
+        translateEsToGl330(
+            fs_source,
+            .fragment,
+            &entry.program.fragment_source,
+            &fs_len,
+            &fs_uniforms_pass1,
+            &fs_uniform_count_pass1,
+            &fs_samplers_pass1,
+            &fs_sampler_count_pass1,
+            &fs_block_size_pass1,
+            null,
+        ) catch {
+            try self.setInfoLog(entry, "fragment shader translate failed");
+            return;
+        };
+
+        var union_uniforms: [MaxProgramUniforms]UniformDecl = undefined;
+        var union_count: usize = 0;
+        const vs_count_pass1: usize = @intCast(vs_uniform_count_pass1);
+        for (vs_uniforms_pass1[0..vs_count_pass1]) |u| {
+            if (union_count >= MaxProgramUniforms) {
+                try self.setInfoLog(entry, "uniform union too large");
+                return;
+            }
+            union_uniforms[union_count] = u;
+            union_count += 1;
+        }
+        const fs_count_pass1: usize = @intCast(fs_uniform_count_pass1);
+        for (fs_uniforms_pass1[0..fs_count_pass1]) |u| {
+            if (hasUniformName(union_uniforms[0..union_count], u.name)) continue;
+            if (union_count >= MaxProgramUniforms) {
+                try self.setInfoLog(entry, "uniform union too large");
+                return;
+            }
+            union_uniforms[union_count] = u;
+            union_count += 1;
+        }
+        const override_uniforms: ?[]const UniformDecl = if (union_count > 0) union_uniforms[0..union_count] else null;
+
         var vs_uniforms: [MaxProgramUniforms]UniformDecl = undefined;
         var vs_uniform_count: u8 = 0;
         var vs_samplers: [MaxProgramSamplers]SamplerDecl = undefined;
         var vs_sampler_count: u8 = 0;
         var vs_block_size: u32 = 0;
-        var vs_len: u32 = 0;
         translateEsToGl330(
             vs_source,
             .vertex,
@@ -274,6 +340,7 @@ pub const ProgramTable = struct {
             &vs_samplers,
             &vs_sampler_count,
             &vs_block_size,
+            override_uniforms,
         ) catch {
             try self.setInfoLog(entry, "vertex shader translate failed");
             return;
@@ -285,7 +352,6 @@ pub const ProgramTable = struct {
         var fs_samplers: [MaxProgramSamplers]SamplerDecl = undefined;
         var fs_sampler_count: u8 = 0;
         var fs_block_size: u32 = 0;
-        var fs_len: u32 = 0;
         translateEsToGl330(
             fs_source,
             .fragment,
@@ -296,6 +362,7 @@ pub const ProgramTable = struct {
             &fs_samplers,
             &fs_sampler_count,
             &fs_block_size,
+            override_uniforms,
         ) catch {
             try self.setInfoLog(entry, "fragment shader translate failed");
             return;
@@ -393,6 +460,14 @@ pub const ProgramTable = struct {
         if (block.size == 0) return error.NoUniformBuffer;
         const size = @as(usize, block.size);
         try writeUniformFloats(uniform, block.buffer[0..size], values);
+        const name = uniform.name_bytes[0..@as(usize, uniform.name_len)];
+        const other_block = if (info.stage == .vertex) &entry.fs_uniforms else &entry.vs_uniforms;
+        if (findUniform(other_block, name)) |other_idx| {
+            if (other_block.size == 0) return error.NoUniformBuffer;
+            const other_uniform = other_block.items[@as(usize, other_idx)];
+            const other_size = @as(usize, other_block.size);
+            try writeUniformFloats(other_uniform, other_block.buffer[0..other_size], values);
+        }
     }
 
     pub fn setUniformInts(self: *Self, id: ProgramId, loc: u32, values: []const i32) !void {
@@ -407,6 +482,14 @@ pub const ProgramTable = struct {
         if (block.size == 0) return error.NoUniformBuffer;
         const size = @as(usize, block.size);
         try writeUniformInts(uniform, block.buffer[0..size], values);
+        const name = uniform.name_bytes[0..@as(usize, uniform.name_len)];
+        const other_block = if (info.stage == .vertex) &entry.fs_uniforms else &entry.vs_uniforms;
+        if (findUniform(other_block, name)) |other_idx| {
+            if (other_block.size == 0) return error.NoUniformBuffer;
+            const other_uniform = other_block.items[@as(usize, other_idx)];
+            const other_size = @as(usize, other_block.size);
+            try writeUniformInts(other_uniform, other_block.buffer[0..other_size], values);
+        }
     }
 
     pub fn ensureBackendShader(self: *Self, id: ProgramId) bool {
@@ -548,7 +631,6 @@ pub const ProgramTable = struct {
         if (decls.len == 0) return;
         if (decls.len > MaxProgramUniforms) return error.TooManyUniforms;
         if (block_size > MaxUniformBlockBytes) return error.UniformBlockTooLarge;
-        block.size = block_size;
         block.count = @intCast(decls.len);
         for (decls, 0..) |decl, idx| {
             if (decl.name.len >= MaxUniformNameBytes) return error.UniformNameTooLong;
@@ -561,8 +643,11 @@ pub const ProgramTable = struct {
             block.items[idx].stride = decl.stride;
             block.items[idx].size = decl.size;
         }
-        if (block_size > 0) {
-            const size: usize = @intCast(block_size);
+        const computed_size = computeUniformBlockSize(block);
+        if (computed_size > MaxUniformBlockBytes) return error.UniformBlockTooLarge;
+        block.size = computed_size;
+        if (block.size > 0) {
+            const size: usize = @intCast(block.size);
             @memset(block.buffer[0..size], 0);
         }
     }
@@ -613,9 +698,10 @@ fn applyUniformBlock(desc: *sg.ShaderDesc, index: usize, stage: sg.ShaderStage, 
     for (block.items, 0..) |item, idx| {
         if (idx >= @as(usize, block.count)) break;
         if (item.name_len == 0) continue;
+        const count: u16 = if (item.array_count == 0) 1 else item.array_count;
         desc.uniform_blocks[index].glsl_uniforms[idx] = .{
             .type = item.utype,
-            .array_count = item.array_count,
+            .array_count = count,
             .glsl_name = item.name_bytes[0..].ptr,
         };
     }
@@ -778,11 +864,13 @@ fn translateEsToGl330(
     samplers: *[MaxProgramSamplers]SamplerDecl,
     sampler_count: *u8,
     block_size: *u32,
+    override_uniforms: ?[]const UniformDecl,
 ) !void {
     if (source.len > shader.MaxShaderSourceBytes) return error.TooLarge;
     uniform_count.* = 0;
     sampler_count.* = 0;
     block_size.* = 0;
+    const use_override = override_uniforms != null;
 
     var body_buf: [MaxTranslatedShaderBytes]u8 = undefined;
     var body_len: usize = 0;
@@ -799,12 +887,16 @@ fn translateEsToGl330(
                 .block => |decl| {
                     const count: usize = @intCast(uniform_count.*);
                     if (count >= MaxProgramUniforms) return error.TooManyUniforms;
-                    uniforms[count] = decl;
-                    uniform_count.* += 1;
+                    if (!use_override) {
+                        if (hasUniformName(uniforms[0..count], decl.name)) continue;
+                        uniforms[count] = decl;
+                        uniform_count.* += 1;
+                    }
                 },
                 .sampler => |decl| {
                     const count: usize = @intCast(sampler_count.*);
                     if (count >= MaxProgramSamplers) return error.TooManySamplers;
+                    if (hasSamplerName(samplers[0..count], decl.name)) continue;
                     samplers[count] = decl;
                     sampler_count.* += 1;
                 },
@@ -827,6 +919,13 @@ fn translateEsToGl330(
         try appendByte(body_buf[0..], &body_len, '\n');
     }
 
+    if (use_override) {
+        const list = override_uniforms.?;
+        if (list.len > MaxProgramUniforms) return error.TooManyUniforms;
+        @memcpy(uniforms[0..list.len], list);
+        uniform_count.* = @intCast(list.len);
+    }
+
     if (uniform_count.* > 0) {
         const count: usize = @intCast(uniform_count.*);
         block_size.* = try layoutUniforms(uniforms[0..count]);
@@ -841,7 +940,7 @@ fn translateEsToGl330(
     }
     if (uniform_count.* > 0) {
         const count: usize = @intCast(uniform_count.*);
-        const block_name = if (stage == .vertex) "vs_params" else "fs_params";
+        const block_name = if (override_uniforms != null) "params" else if (stage == .vertex) "vs_params" else "fs_params";
         try appendBytes(header_buf[0..], &header_len, "layout(std140) uniform ");
         try appendBytes(header_buf[0..], &header_len, block_name);
         try appendBytes(header_buf[0..], &header_len, " {\n");
@@ -931,6 +1030,22 @@ fn parseUniformName(token: []const u8) ?UniformName {
     return .{ .name = name, .count = count };
 }
 
+fn hasUniformName(uniforms: []const UniformDecl, name: []const u8) bool {
+    for (uniforms) |u| {
+        if (u.name.len == 0) continue;
+        if (std.mem.eql(u8, u.name, name)) return true;
+    }
+    return false;
+}
+
+fn hasSamplerName(samplers: []const SamplerDecl, name: []const u8) bool {
+    for (samplers) |s| {
+        if (s.name.len == 0) continue;
+        if (std.mem.eql(u8, s.name, name)) return true;
+    }
+    return false;
+}
+
 fn isPrecision(token: []const u8) bool {
     return std.mem.eql(u8, token, "lowp") or std.mem.eql(u8, token, "mediump") or std.mem.eql(u8, token, "highp");
 }
@@ -994,6 +1109,28 @@ fn layoutUniforms(uniforms: []UniformDecl) !u32 {
         offset += u.stride * elem_count;
     }
     return alignUp(offset, 16);
+}
+
+fn computeUniformBlockSize(block: *const UniformBlock) u32 {
+    var offset: u32 = 0;
+    if (block.count == 0) return 0;
+    for (block.items, 0..) |item, idx| {
+        if (idx >= @as(usize, block.count)) break;
+        if (item.name_len == 0) continue;
+        const alignment = uniformAlign(item.utype, item.array_count);
+        offset = alignUp(offset, alignment);
+        offset += uniformMemberSize(item.utype, item.array_count);
+    }
+    return alignUp(offset, 16);
+}
+
+fn uniformMemberSize(utype: sg.UniformType, array_count: u16) u32 {
+    if (array_count <= 1) return uniformSize(utype);
+    return switch (utype) {
+        .FLOAT, .FLOAT2, .FLOAT3, .FLOAT4, .INT, .INT2, .INT3, .INT4 => 16 * @as(u32, array_count),
+        .MAT4 => 64 * @as(u32, array_count),
+        else => 0,
+    };
 }
 
 fn uniformAlign(utype: sg.UniformType, array_count: u16) u32 {

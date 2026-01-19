@@ -1,0 +1,31 @@
+{
+  "name": "three-native",
+  "version": "1.0.0",
+  "description": "Native runtime for Three.js games. Write Three.js, ship to Steam as a small native binary. Same codebase runs in browser.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples"
+  },
+  "scripts": {
+    "build:three-es5": "node build-three-es5.mjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mattneel/three-native.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/mattneel/three-native/issues"
+  },
+  "homepage": "https://github.com/mattneel/three-native#readme",
+  "devDependencies": {
+    "@babel/core": "^7.28.6",
+    "@babel/preset-env": "^7.28.6",
+    "esbuild": "^0.27.2"
+  }
+}

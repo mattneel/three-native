@@ -52,10 +52,24 @@ Three.js touches these browser APIs:
 ```bash
 git clone --recursive https://github.com/mattneel/three-native
 cd three-native
-zig build run
+zig build run -- examples/creating-a-scene.js
 ```
 
-Requires: Zig 0.15+ (that's it - no external C compiler needed)
+Requires:
+
+- Zig 0.15.2+
+- Node.js + npm (used to build the ES5 Three.js bundle on first run)
+
+Notes:
+
+- `zig build run` automatically runs `npm install` and builds `examples/three.es5.js`.
+- You can rebuild the bundle manually with `zig build three-es5`.
+- Three.js is a submodule, so `--recursive` is required on clone.
+
+## Vendored Dependencies
+
+- `deps/sokol-zig` is vendored to keep Sokol patches reproducible. We raise
+  `SG_MAX_UNIFORMBLOCK_MEMBERS` to 64 to match current Three.js shader needs.
 
 ## Status
 

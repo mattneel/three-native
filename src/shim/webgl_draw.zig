@@ -53,7 +53,7 @@ const GL_FUNC_REVERSE_SUBTRACT: u32 = 0x800B;
 
 pub const MaxVertexAttribs: usize = 16;
 pub const MaxDrawCommands: usize = 64;
-const MaxVertexBuffers: usize = sg.Bindings.vertex_buffers.len;
+const MaxVertexBuffers: usize = (sg.Bindings{}).vertex_buffers.len;
 const MaxPipelineCacheEntries: usize = 64;
 
 const PipelineCacheEntry = struct {
@@ -545,7 +545,7 @@ pub fn drawElements(mode: u32, count: i32, index_type: u32, offset: u32, element
 
 fn validateCommand(
     cmd: *const DrawCommand,
-    mgr: *const webgl_state.BufferManager,
+    mgr: *webgl_state.BufferManager,
     programs: *webgl_program.ProgramTable,
 ) !*const webgl_program.Program {
     const prog = programs.get(cmd.program) orelse return error.InvalidProgram;
@@ -666,6 +666,7 @@ pub fn flush() void {
         var slot_buffers: [MaxVertexBuffers]?webgl.BufferId = [_]?webgl.BufferId{null} ** MaxVertexBuffers;
         var slot_strides: [MaxVertexBuffers]u32 = [_]u32{0} ** MaxVertexBuffers;
         var slot_count: usize = 0;
+        var max_attr_index: ?usize = null;
 
         for (cmd.attribs, 0..) |attrib, attr_index| {
             if (!attrib.enabled) continue;
@@ -690,6 +691,9 @@ pub fn flush() void {
             pip_desc.layout.attrs[attr_index].buffer_index = @intCast(slot_idx);
             pip_desc.layout.attrs[attr_index].offset = @intCast(attrib.offset);
             pip_desc.layout.attrs[attr_index].format = format;
+            if (max_attr_index == null or attr_index > max_attr_index.?) {
+                max_attr_index = attr_index;
+            }
 
             var stride = attrib.stride;
             if (stride == 0) {
@@ -699,6 +703,18 @@ pub fn flush() void {
                 slot_strides[slot_idx] = stride;
             } else if (slot_strides[slot_idx] != stride) {
                 continue;
+            }
+        }
+
+        if (slot_count > 0) {
+            if (max_attr_index) |max_idx| {
+                for (0..max_idx + 1) |idx| {
+                    if (pip_desc.layout.attrs[idx].format == .INVALID) {
+                        pip_desc.layout.attrs[idx].buffer_index = 0;
+                        pip_desc.layout.attrs[idx].offset = 0;
+                        pip_desc.layout.attrs[idx].format = .FLOAT;
+                    }
+                }
             }
         }
 
@@ -739,7 +755,10 @@ pub fn flush() void {
             sg.applyUniforms(1, .{ .ptr = slice.ptr, .size = slice.len });
         }
         const base = if (cmd.kind == .arrays) cmd.first else 0;
-        sg.draw(base, cmd.count, 1);
+        const base_u32: u32 = if (base < 0) 0 else @intCast(base);
+        const count_u32: u32 = if (cmd.count < 0) 0 else @intCast(cmd.count);
+        if (count_u32 == 0) continue;
+        sg.draw(base_u32, count_u32, 1);
     }
 }
 

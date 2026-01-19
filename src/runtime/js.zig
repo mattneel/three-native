@@ -4,6 +4,7 @@
 //! are implemented in Zig and provided through the stdlib table.
 
 const std = @import("std");
+const sg = @import("sokol").gfx;
 const webgl_state = @import("../shim/webgl_state.zig");
 const webgl = @import("../shim/webgl.zig");
 const webgl_shader = @import("../shim/webgl_shader.zig");
@@ -190,6 +191,12 @@ var g_runtime: ?*Runtime = null;
 var g_start_time_ms: i64 = 0;
 var g_js_mutex: std.Thread.Mutex = .{};
 
+const MaxTextureUnits: usize = 8;
+const MaxTextures: usize = 256;
+const MaxFramebuffers: usize = 64;
+const MaxRenderbuffers: usize = 64;
+const MaxVertexArrays: usize = 64;
+
 const GlState = struct {
     viewport: [4]i32 = .{ 0, 0, 0, 0 },
     scissor: [4]i32 = .{ 0, 0, 0, 0 },
@@ -208,6 +215,9 @@ const GlState = struct {
     blend_dst_alpha: u32 = GL_ZERO,
     blend_eq: u32 = GL_FUNC_ADD,
     blend_eq_alpha: u32 = GL_FUNC_ADD,
+    active_texture_unit: u32 = 0,
+    bound_textures_2d: [MaxTextureUnits]u32 = [_]u32{0} ** MaxTextureUnits,
+    bound_textures_cube: [MaxTextureUnits]u32 = [_]u32{0} ** MaxTextureUnits,
     stencil_func_front: u32 = GL_ALWAYS,
     stencil_func_back: u32 = GL_ALWAYS,
     stencil_ref_front: u8 = 0,
@@ -240,6 +250,17 @@ const GlState = struct {
 };
 
 var g_gl_state: GlState = .{};
+var g_texture_live: [MaxTextures]bool = [_]bool{false} ** MaxTextures;
+var g_next_texture_id: u32 = 1;
+var g_framebuffer_live: [MaxFramebuffers]bool = [_]bool{false} ** MaxFramebuffers;
+var g_next_framebuffer_id: u32 = 1;
+var g_bound_framebuffer: u32 = 0;
+var g_renderbuffer_live: [MaxRenderbuffers]bool = [_]bool{false} ** MaxRenderbuffers;
+var g_next_renderbuffer_id: u32 = 1;
+var g_bound_renderbuffer: u32 = 0;
+var g_vao_live: [MaxVertexArrays]bool = [_]bool{false} ** MaxVertexArrays;
+var g_next_vao_id: u32 = 1;
+var g_bound_vao: u32 = 0;
 
 fn getRuntime(ctx: *c.JSContext) ?*Runtime {
     const ctx_opaque = c.JS_GetContextOpaque(ctx);
@@ -297,6 +318,8 @@ fn createDomStubs(ctx: *c.JSContext) !void {
 
     const create_elem = c.JS_GetPropertyStr(ctx, global, "__dom_createElement");
     _ = c.JS_SetPropertyStr(ctx, document, "createElement", create_elem);
+    const create_elem_ns = c.JS_GetPropertyStr(ctx, global, "__dom_createElementNS");
+    _ = c.JS_SetPropertyStr(ctx, document, "createElementNS", create_elem_ns);
 
     _ = c.JS_SetPropertyStr(ctx, global, "document", document);
 
@@ -307,7 +330,12 @@ fn createDomStubs(ctx: *c.JSContext) !void {
     _ = c.JS_SetPropertyStr(ctx, window_obj, "addEventListener", noop_evt);
     const noop_evt2 = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
     _ = c.JS_SetPropertyStr(ctx, window_obj, "removeEventListener", noop_evt2);
+    const raf = c.JS_GetPropertyStr(ctx, global, "requestAnimationFrame");
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "requestAnimationFrame", raf);
+    const caf = c.JS_GetPropertyStr(ctx, global, "cancelAnimationFrame");
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "cancelAnimationFrame", caf);
     _ = c.JS_SetPropertyStr(ctx, global, "window", window_obj);
+    _ = c.JS_SetPropertyStr(ctx, global, "self", window_obj);
 }
 
 const GL_ARRAY_BUFFER: u32 = 34962;
@@ -316,7 +344,25 @@ const GL_VERTEX_SHADER: u32 = 35633;
 const GL_FRAGMENT_SHADER: u32 = 35632;
 const GL_COMPILE_STATUS: u32 = 35713;
 const GL_LINK_STATUS: u32 = 35714;
+const GL_VALIDATE_STATUS: u32 = 0x8B83;
+const GL_ATTACHED_SHADERS: u32 = 0x8B85;
+const GL_ACTIVE_UNIFORMS: u32 = 0x8B86;
+const GL_ACTIVE_ATTRIBUTES: u32 = 0x8B89;
+const GL_FLOAT_VEC2: u32 = 0x8B50;
+const GL_FLOAT_VEC3: u32 = 0x8B51;
+const GL_FLOAT_VEC4: u32 = 0x8B52;
+const GL_INT_VEC2: u32 = 0x8B53;
+const GL_INT_VEC3: u32 = 0x8B54;
+const GL_INT_VEC4: u32 = 0x8B55;
+const GL_FLOAT_MAT4: u32 = 0x8B5C;
+const GL_SAMPLER_2D: u32 = 0x8B5E;
+const GL_SAMPLER_CUBE: u32 = 0x8B60;
+const GL_SAMPLER_2D_SHADOW: u32 = 0x8B62;
+const GL_SAMPLER_2D_ARRAY: u32 = 0x8DC1;
+const GL_SAMPLER_2D_ARRAY_SHADOW: u32 = 0x8DC4;
+const GL_SAMPLER_CUBE_SHADOW: u32 = 0x8DC5;
 const GL_FLOAT: u32 = 5126;
+const GL_INT: u32 = 0x1404;
 const GL_UNSIGNED_SHORT: u32 = 5123;
 const GL_UNSIGNED_INT: u32 = 5125;
 const GL_TRIANGLES: u32 = 0x0004;
@@ -342,6 +388,34 @@ const GL_STENCIL_BACK_PASS_DEPTH_PASS: u32 = 0x8803;
 const GL_STENCIL_BACK_REF: u32 = 0x8CA3;
 const GL_STENCIL_BACK_VALUE_MASK: u32 = 0x8CA4;
 const GL_STENCIL_BACK_WRITEMASK: u32 = 0x8CA5;
+const GL_TEXTURE_2D: u32 = 0x0DE1;
+const GL_TEXTURE_CUBE_MAP: u32 = 0x8513;
+const GL_TEXTURE_3D: u32 = 0x806F;
+const GL_TEXTURE_2D_ARRAY: u32 = 0x8C1A;
+const GL_TEXTURE_CUBE_MAP_POSITIVE_X: u32 = 0x8515;
+const GL_TEXTURE_CUBE_MAP_NEGATIVE_X: u32 = 0x8516;
+const GL_TEXTURE_CUBE_MAP_POSITIVE_Y: u32 = 0x8517;
+const GL_TEXTURE_CUBE_MAP_NEGATIVE_Y: u32 = 0x8518;
+const GL_TEXTURE_CUBE_MAP_POSITIVE_Z: u32 = 0x8519;
+const GL_TEXTURE_CUBE_MAP_NEGATIVE_Z: u32 = 0x851A;
+const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
+const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+const GL_TEXTURE_WRAP_S: u32 = 0x2802;
+const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+const GL_CLAMP_TO_EDGE: u32 = 0x812F;
+const GL_REPEAT: u32 = 0x2901;
+const GL_MIRRORED_REPEAT: u32 = 0x8370;
+const GL_NEAREST: u32 = 0x2600;
+const GL_LINEAR: u32 = 0x2601;
+const GL_TEXTURE0: u32 = 0x84C0;
+const GL_FRAMEBUFFER: u32 = 0x8D40;
+const GL_RENDERBUFFER: u32 = 0x8D41;
+const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+const GL_DEPTH_ATTACHMENT: u32 = 0x8D00;
+const GL_STENCIL_ATTACHMENT: u32 = 0x8D20;
+const GL_DEPTH_STENCIL_ATTACHMENT: u32 = 0x821A;
+const GL_DEPTH_STENCIL: u32 = 0x84F9;
 const GL_BLEND: u32 = 0x0BE2;
 const GL_CULL_FACE: u32 = 0x0B44;
 const GL_POLYGON_OFFSET_FILL: u32 = 0x8037;
@@ -683,16 +757,7 @@ export fn js_dom_noop(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue)
     return c.JS_UNDEFINED;
 }
 
-export fn js_dom_createElement(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
-    if (argc < 1 or c.JS_IsString(ctx, argv[0]) == 0) {
-        return c.JS_UNDEFINED;
-    }
-    var len: usize = 0;
-    var buf: c.JSCStringBuf = undefined;
-    const c_str = c.JS_ToCStringLen(ctx, &len, argv[0], &buf);
-    if (c_str == null) return c.JS_UNDEFINED;
-    const tag = @as([*]const u8, @ptrCast(c_str))[0..len];
-
+fn createElementForTag(ctx: *c.JSContext, tag: []const u8) c.JSValue {
     const elem = c.JS_NewObject(ctx);
     const style = c.JS_NewObject(ctx);
     _ = c.JS_SetPropertyStr(ctx, elem, "style", style);
@@ -711,6 +776,30 @@ export fn js_dom_createElement(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, ar
     }
 
     return elem;
+}
+
+export fn js_dom_createElement(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1 or c.JS_IsString(ctx, argv[0]) == 0) {
+        return c.JS_UNDEFINED;
+    }
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[0], &buf);
+    if (c_str == null) return c.JS_UNDEFINED;
+    const tag = @as([*]const u8, @ptrCast(c_str))[0..len];
+    return createElementForTag(ctx, tag);
+}
+
+export fn js_dom_createElementNS(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2 or c.JS_IsString(ctx, argv[1]) == 0) {
+        return c.JS_UNDEFINED;
+    }
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[1], &buf);
+    if (c_str == null) return c.JS_UNDEFINED;
+    const tag = @as([*]const u8, @ptrCast(c_str))[0..len];
+    return createElementForTag(ctx, tag);
 }
 
 export fn js_dom_getContext(ctx: *c.JSContext, this_val: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -792,6 +881,125 @@ fn applyStencilFaceU8(face: u32, front: *u8, back: *u8, value: u8) void {
         },
         else => {},
     }
+}
+
+fn allocTextureId() ?u32 {
+    var idx: usize = @intCast((g_next_texture_id - 1) % MaxTextures);
+    var tried: usize = 0;
+    while (tried < MaxTextures) : (tried += 1) {
+        if (!g_texture_live[idx]) {
+            g_texture_live[idx] = true;
+            g_next_texture_id = @intCast(idx + 2);
+            return @intCast(idx + 1);
+        }
+        idx = (idx + 1) % MaxTextures;
+    }
+    return null;
+}
+
+fn isTextureId(id: u32) bool {
+    if (id == 0 or id > MaxTextures) return false;
+    return g_texture_live[id - 1];
+}
+
+fn freeTextureId(id: u32) bool {
+    if (!isTextureId(id)) return false;
+    g_texture_live[id - 1] = false;
+    return true;
+}
+
+fn allocFramebufferId() ?u32 {
+    var idx: usize = @intCast((g_next_framebuffer_id - 1) % MaxFramebuffers);
+    var tried: usize = 0;
+    while (tried < MaxFramebuffers) : (tried += 1) {
+        if (!g_framebuffer_live[idx]) {
+            g_framebuffer_live[idx] = true;
+            g_next_framebuffer_id = @intCast(idx + 2);
+            return @intCast(idx + 1);
+        }
+        idx = (idx + 1) % MaxFramebuffers;
+    }
+    return null;
+}
+
+fn isFramebufferId(id: u32) bool {
+    if (id == 0 or id > MaxFramebuffers) return false;
+    return g_framebuffer_live[id - 1];
+}
+
+fn freeFramebufferId(id: u32) bool {
+    if (!isFramebufferId(id)) return false;
+    g_framebuffer_live[id - 1] = false;
+    return true;
+}
+
+fn allocRenderbufferId() ?u32 {
+    var idx: usize = @intCast((g_next_renderbuffer_id - 1) % MaxRenderbuffers);
+    var tried: usize = 0;
+    while (tried < MaxRenderbuffers) : (tried += 1) {
+        if (!g_renderbuffer_live[idx]) {
+            g_renderbuffer_live[idx] = true;
+            g_next_renderbuffer_id = @intCast(idx + 2);
+            return @intCast(idx + 1);
+        }
+        idx = (idx + 1) % MaxRenderbuffers;
+    }
+    return null;
+}
+
+fn isRenderbufferId(id: u32) bool {
+    if (id == 0 or id > MaxRenderbuffers) return false;
+    return g_renderbuffer_live[id - 1];
+}
+
+fn freeRenderbufferId(id: u32) bool {
+    if (!isRenderbufferId(id)) return false;
+    g_renderbuffer_live[id - 1] = false;
+    return true;
+}
+
+fn allocVaoId() ?u32 {
+    var idx: usize = @intCast((g_next_vao_id - 1) % MaxVertexArrays);
+    var tried: usize = 0;
+    while (tried < MaxVertexArrays) : (tried += 1) {
+        if (!g_vao_live[idx]) {
+            g_vao_live[idx] = true;
+            g_next_vao_id = @intCast(idx + 2);
+            return @intCast(idx + 1);
+        }
+        idx = (idx + 1) % MaxVertexArrays;
+    }
+    return null;
+}
+
+fn isVaoId(id: u32) bool {
+    if (id == 0 or id > MaxVertexArrays) return false;
+    return g_vao_live[id - 1];
+}
+
+fn freeVaoId(id: u32) bool {
+    if (!isVaoId(id)) return false;
+    g_vao_live[id - 1] = false;
+    return true;
+}
+
+fn uniformTypeToGlEnum(utype: sg.UniformType) u32 {
+    return switch (utype) {
+        .FLOAT => GL_FLOAT,
+        .FLOAT2 => GL_FLOAT_VEC2,
+        .FLOAT3 => GL_FLOAT_VEC3,
+        .FLOAT4 => GL_FLOAT_VEC4,
+        .INT => GL_INT,
+        .INT2 => GL_INT_VEC2,
+        .INT3 => GL_INT_VEC3,
+        .INT4 => GL_INT_VEC4,
+        .MAT4 => GL_FLOAT_MAT4,
+        else => GL_FLOAT,
+    };
+}
+
+fn samplerKindToGlEnum(kind: u8) u32 {
+    return if (kind == 1) GL_SAMPLER_CUBE else GL_SAMPLER_2D;
 }
 
 export fn js_gl_getParameter(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -894,7 +1102,7 @@ export fn js_gl_stencilFunc(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv:
     _ = c.JS_ToInt32(ctx, &ref, argv[1]);
     _ = c.JS_ToUint32(ctx, &mask, argv[2]);
     const ref_u8 = clampU8(ref);
-    const mask_u8 = clampU8(@intCast(mask));
+    const mask_u8: u8 = @truncate(mask);
     g_gl_state.stencil_func_front = func;
     g_gl_state.stencil_func_back = func;
     g_gl_state.stencil_ref_front = ref_u8;
@@ -916,7 +1124,7 @@ export fn js_gl_stencilFuncSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_in
     _ = c.JS_ToInt32(ctx, &ref, argv[2]);
     _ = c.JS_ToUint32(ctx, &mask, argv[3]);
     const ref_u8 = clampU8(ref);
-    const mask_u8 = clampU8(@intCast(mask));
+    const mask_u8: u8 = @truncate(mask);
     applyStencilFaceU32(face, &g_gl_state.stencil_func_front, &g_gl_state.stencil_func_back, func);
     applyStencilFaceU8(face, &g_gl_state.stencil_ref_front, &g_gl_state.stencil_ref_back, ref_u8);
     applyStencilFaceU8(face, &g_gl_state.stencil_value_mask_front, &g_gl_state.stencil_value_mask_back, mask_u8);
@@ -928,7 +1136,7 @@ export fn js_gl_stencilMask(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv:
     if (argc < 1) return c.JS_UNDEFINED;
     var mask: u32 = 0;
     _ = c.JS_ToUint32(ctx, &mask, argv[0]);
-    const mask_u8 = clampU8(@intCast(mask));
+    const mask_u8: u8 = @truncate(mask);
     g_gl_state.stencil_write_mask_front = mask_u8;
     g_gl_state.stencil_write_mask_back = mask_u8;
     webgl_draw.setStencilMask(mask);
@@ -941,7 +1149,7 @@ export fn js_gl_stencilMaskSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_in
     var mask: u32 = 0;
     _ = c.JS_ToUint32(ctx, &face, argv[0]);
     _ = c.JS_ToUint32(ctx, &mask, argv[1]);
-    const mask_u8 = clampU8(@intCast(mask));
+    const mask_u8: u8 = @truncate(mask);
     applyStencilFaceU8(face, &g_gl_state.stencil_write_mask_front, &g_gl_state.stencil_write_mask_back, mask_u8);
     webgl_draw.setStencilMaskSeparate(face, mask);
     return c.JS_UNDEFINED;
@@ -979,6 +1187,187 @@ export fn js_gl_stencilOpSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_int,
     applyStencilFaceU32(face, &g_gl_state.stencil_zfail_front, &g_gl_state.stencil_zfail_back, zfail);
     applyStencilFaceU32(face, &g_gl_state.stencil_zpass_front, &g_gl_state.stencil_zpass_back, zpass);
     webgl_draw.setStencilOpSeparate(face, fail, zfail, zpass);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_activeTexture(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var unit: u32 = 0;
+    if (c.JS_ToUint32(ctx, &unit, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (unit < GL_TEXTURE0) return c.JS_UNDEFINED;
+    const idx = unit - GL_TEXTURE0;
+    if (idx >= MaxTextureUnits) return c.JS_UNDEFINED;
+    g_gl_state.active_texture_unit = idx;
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_createTexture(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    const id = allocTextureId() orelse return c.JS_NULL;
+    return c.JS_NewUint32(ctx, id);
+}
+
+export fn js_gl_deleteTexture(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (freeTextureId(raw)) {
+        for (&g_gl_state.bound_textures_2d) |*slot| {
+            if (slot.* == raw) slot.* = 0;
+        }
+        for (&g_gl_state.bound_textures_cube) |*slot| {
+            if (slot.* == raw) slot.* = 0;
+        }
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_bindTexture(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var target: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
+    var raw: u32 = 0;
+    if (argv[1] != c.JS_NULL and argv[1] != c.JS_UNDEFINED) {
+        if (c.JS_ToUint32(ctx, &raw, argv[1]) != 0) return c.JS_EXCEPTION;
+    }
+    if (raw != 0 and !isTextureId(raw)) {
+        return throwTypeError(ctx, "invalid texture handle");
+    }
+    const unit = g_gl_state.active_texture_unit;
+    switch (target) {
+        GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_3D => g_gl_state.bound_textures_2d[unit] = raw,
+        GL_TEXTURE_CUBE_MAP => g_gl_state.bound_textures_cube[unit] = raw,
+        else => {},
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_texParameteri(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_texImage2D(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_texSubImage2D(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_texImage3D(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_texSubImage3D(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_generateMipmap(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_createFramebuffer(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    const id = allocFramebufferId() orelse return c.JS_NULL;
+    return c.JS_NewUint32(ctx, id);
+}
+
+export fn js_gl_deleteFramebuffer(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (freeFramebufferId(raw) and g_bound_framebuffer == raw) {
+        g_bound_framebuffer = 0;
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_bindFramebuffer(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var target: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (target != GL_FRAMEBUFFER) return c.JS_UNDEFINED;
+    var raw: u32 = 0;
+    if (argv[1] != c.JS_NULL and argv[1] != c.JS_UNDEFINED) {
+        if (c.JS_ToUint32(ctx, &raw, argv[1]) != 0) return c.JS_EXCEPTION;
+    }
+    if (raw != 0 and !isFramebufferId(raw)) {
+        return throwTypeError(ctx, "invalid framebuffer handle");
+    }
+    g_bound_framebuffer = raw;
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_framebufferTexture2D(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_checkFramebufferStatus(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_NewUint32(ctx, GL_FRAMEBUFFER_COMPLETE);
+}
+
+export fn js_gl_createRenderbuffer(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    const id = allocRenderbufferId() orelse return c.JS_NULL;
+    return c.JS_NewUint32(ctx, id);
+}
+
+export fn js_gl_deleteRenderbuffer(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (freeRenderbufferId(raw) and g_bound_renderbuffer == raw) {
+        g_bound_renderbuffer = 0;
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_bindRenderbuffer(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var target: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (target != GL_RENDERBUFFER) return c.JS_UNDEFINED;
+    var raw: u32 = 0;
+    if (argv[1] != c.JS_NULL and argv[1] != c.JS_UNDEFINED) {
+        if (c.JS_ToUint32(ctx, &raw, argv[1]) != 0) return c.JS_EXCEPTION;
+    }
+    if (raw != 0 and !isRenderbufferId(raw)) {
+        return throwTypeError(ctx, "invalid renderbuffer handle");
+    }
+    g_bound_renderbuffer = raw;
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_renderbufferStorage(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_framebufferRenderbuffer(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_createVertexArray(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    const id = allocVaoId() orelse return c.JS_NULL;
+    return c.JS_NewUint32(ctx, id);
+}
+
+export fn js_gl_deleteVertexArray(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (freeVaoId(raw) and g_bound_vao == raw) {
+        g_bound_vao = 0;
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_bindVertexArray(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var raw: u32 = 0;
+    if (argv[0] != c.JS_NULL and argv[0] != c.JS_UNDEFINED) {
+        if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) return c.JS_EXCEPTION;
+    }
+    if (raw != 0 and !isVaoId(raw)) {
+        return throwTypeError(ctx, "invalid vertex array handle");
+    }
+    g_bound_vao = raw;
     return c.JS_UNDEFINED;
 }
 
@@ -1541,14 +1930,27 @@ export fn js_gl_getProgramParameter(ctx: *c.JSContext, _: *c.JSValue, argc: c_in
     if (c.JS_ToUint32(ctx, &pname, argv[1]) != 0) {
         return c.JS_EXCEPTION;
     }
-    if (pname != GL_LINK_STATUS) {
-        return throwTypeError(ctx, "invalid program parameter");
-    }
     const programs = webgl_program.globalProgramTable();
     const prog = programs.get(programIdFromU32(raw)) orelse {
         return throwTypeError(ctx, "invalid program handle");
     };
-    return if (prog.linked) c.JS_TRUE else c.JS_FALSE;
+    switch (pname) {
+        GL_LINK_STATUS => return if (prog.linked) c.JS_TRUE else c.JS_FALSE,
+        GL_VALIDATE_STATUS => return c.JS_TRUE,
+        GL_ACTIVE_ATTRIBUTES => return c.JS_NewUint32(ctx, prog.attr_count),
+        GL_ACTIVE_UNIFORMS => {
+            const block_count: u32 = if (prog.vs_uniforms.count >= prog.fs_uniforms.count) prog.vs_uniforms.count else prog.fs_uniforms.count;
+            const total: u32 = block_count + prog.sampler_count;
+            return c.JS_NewUint32(ctx, total);
+        },
+        GL_ATTACHED_SHADERS => {
+            var count: u32 = 0;
+            if (prog.vertex_shader != null) count += 1;
+            if (prog.fragment_shader != null) count += 1;
+            return c.JS_NewUint32(ctx, count);
+        },
+        else => return c.JS_NULL,
+    }
 }
 
 export fn js_gl_getProgramInfoLog(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -1610,6 +2012,94 @@ export fn js_gl_getAttribLocation(ctx: *c.JSContext, _: *c.JSValue, argc: c_int,
         return throwTypeError(ctx, "invalid program handle");
     };
     return c.JS_NewInt32(ctx, @intCast(loc));
+}
+
+export fn js_gl_getActiveAttrib(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) {
+        return throwTypeError(ctx, "getActiveAttrib requires (program, index)");
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    var index: u32 = 0;
+    if (c.JS_ToUint32(ctx, &index, argv[1]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const programs = webgl_program.globalProgramTable();
+    const prog = programs.get(programIdFromU32(raw)) orelse {
+        return throwTypeError(ctx, "invalid program handle");
+    };
+    if (index >= prog.attr_count) {
+        return c.JS_NULL;
+    }
+    const idx: usize = @intCast(index);
+    const name_len: usize = @intCast(prog.attr_name_lens[idx]);
+    if (name_len == 0) return c.JS_NULL;
+    const obj = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, obj, "name", c.JS_NewStringLen(ctx, prog.attr_names[idx][0..name_len].ptr, name_len));
+    _ = c.JS_SetPropertyStr(ctx, obj, "size", c.JS_NewInt32(ctx, 1));
+    _ = c.JS_SetPropertyStr(ctx, obj, "type", c.JS_NewUint32(ctx, GL_FLOAT));
+    return obj;
+}
+
+export fn js_gl_getActiveUniform(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) {
+        return throwTypeError(ctx, "getActiveUniform requires (program, index)");
+    }
+    var raw: u32 = 0;
+    if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    var index: u32 = 0;
+    if (c.JS_ToUint32(ctx, &index, argv[1]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+    const programs = webgl_program.globalProgramTable();
+    const prog = programs.get(programIdFromU32(raw)) orelse {
+        return throwTypeError(ctx, "invalid program handle");
+    };
+    const block_count: usize = @intCast(if (prog.vs_uniforms.count >= prog.fs_uniforms.count) prog.vs_uniforms.count else prog.fs_uniforms.count);
+    const sampler_count: usize = @intCast(prog.sampler_count);
+    const total: usize = block_count + sampler_count;
+    if (index >= total) return c.JS_NULL;
+    var name_buf: [webgl_program.MaxUniformNameBytes + 3]u8 = undefined;
+    var name_len: usize = 0;
+    var size: u32 = 1;
+    var utype: u32 = GL_FLOAT;
+    if (index < block_count) {
+        const u = prog.vs_uniforms.items[@as(usize, @intCast(index))];
+        name_len = @intCast(u.name_len);
+        if (name_len == 0) return c.JS_NULL;
+        @memcpy(name_buf[0..name_len], u.name_bytes[0..name_len]);
+        size = if (u.array_count == 0) 1 else u.array_count;
+        if (size > 1 and name_len + 3 <= name_buf.len) {
+            name_buf[name_len] = '[';
+            name_buf[name_len + 1] = '0';
+            name_buf[name_len + 2] = ']';
+            name_len += 3;
+        }
+        utype = uniformTypeToGlEnum(u.utype);
+    } else {
+        const s_idx: usize = @intCast(index - block_count);
+        const s = prog.samplers[s_idx];
+        name_len = @intCast(s.name_len);
+        if (name_len == 0) return c.JS_NULL;
+        @memcpy(name_buf[0..name_len], s.name_bytes[0..name_len]);
+        size = if (s.array_count == 0) 1 else s.array_count;
+        if (size > 1 and name_len + 3 <= name_buf.len) {
+            name_buf[name_len] = '[';
+            name_buf[name_len + 1] = '0';
+            name_buf[name_len + 2] = ']';
+            name_len += 3;
+        }
+        utype = samplerKindToGlEnum(@intFromEnum(s.kind));
+    }
+    const obj = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, obj, "name", c.JS_NewStringLen(ctx, name_buf[0..name_len].ptr, name_len));
+    _ = c.JS_SetPropertyStr(ctx, obj, "size", c.JS_NewUint32(ctx, size));
+    _ = c.JS_SetPropertyStr(ctx, obj, "type", c.JS_NewUint32(ctx, utype));
+    return obj;
 }
 
 export fn js_gl_enableVertexAttribArray(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -1779,7 +2269,7 @@ export fn js_gl_uniform1f(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToNumber(ctx, &x, argv[1]) != 0) return c.JS_EXCEPTION;
     const values = [_]f32{@floatCast(x)};
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform1f failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1794,7 +2284,7 @@ export fn js_gl_uniform2f(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToNumber(ctx, &y, argv[2]) != 0) return c.JS_EXCEPTION;
     const values = [_]f32{ @floatCast(x), @floatCast(y) };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform2f failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1811,7 +2301,7 @@ export fn js_gl_uniform3f(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToNumber(ctx, &z, argv[3]) != 0) return c.JS_EXCEPTION;
     const values = [_]f32{ @floatCast(x), @floatCast(y), @floatCast(z) };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform3f failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1830,7 +2320,7 @@ export fn js_gl_uniform4f(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToNumber(ctx, &w, argv[4]) != 0) return c.JS_EXCEPTION;
     const values = [_]f32{ @floatCast(x), @floatCast(y), @floatCast(z), @floatCast(w) };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform4f failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1843,7 +2333,7 @@ export fn js_gl_uniform1i(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToInt32(ctx, &x, argv[1]) != 0) return c.JS_EXCEPTION;
     const values = [_]i32{@intCast(x)};
     webgl_program.globalProgramTable().setUniformInts(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform1i failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1858,7 +2348,7 @@ export fn js_gl_uniform2i(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToInt32(ctx, &y, argv[2]) != 0) return c.JS_EXCEPTION;
     const values = [_]i32{ @intCast(x), @intCast(y) };
     webgl_program.globalProgramTable().setUniformInts(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform2i failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1875,7 +2365,7 @@ export fn js_gl_uniform3i(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToInt32(ctx, &z, argv[3]) != 0) return c.JS_EXCEPTION;
     const values = [_]i32{ @intCast(x), @intCast(y), @intCast(z) };
     webgl_program.globalProgramTable().setUniformInts(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform3i failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1894,7 +2384,7 @@ export fn js_gl_uniform4i(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToInt32(ctx, &w, argv[4]) != 0) return c.JS_EXCEPTION;
     const values = [_]i32{ @intCast(x), @intCast(y), @intCast(z), @intCast(w) };
     webgl_program.globalProgramTable().setUniformInts(prog, loc, values[0..]) catch {
-        return throwTypeError(ctx, "uniform4i failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1911,7 +2401,7 @@ export fn js_gl_uniformMatrix4fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, 
         return throwTypeError(ctx, "uniformMatrix4fv requires Float32Array");
     };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
-        return throwTypeError(ctx, "uniformMatrix4fv failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1925,7 +2415,7 @@ export fn js_gl_uniform3fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
         return throwTypeError(ctx, "uniform3fv requires Float32Array");
     };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
-        return throwTypeError(ctx, "uniform3fv failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }
@@ -1939,7 +2429,7 @@ export fn js_gl_uniform4fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
         return throwTypeError(ctx, "uniform4fv requires Float32Array");
     };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
-        return throwTypeError(ctx, "uniform4fv failed");
+        return c.JS_UNDEFINED;
     };
     return c.JS_UNDEFINED;
 }

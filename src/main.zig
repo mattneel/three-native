@@ -25,34 +25,54 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    const script_path: ?[]const u8 = if (args.len > 1) args[1] else null;
+    const runtime_mem: usize = if (script_path != null) 16 * 1024 * 1024 else 64 * 1024;
+
     // Initialize JS runtime (pure Zig bindings)
-    var runtime = try JsRuntime.init(allocator, 64 * 1024);
+    var runtime = try JsRuntime.init(allocator, runtime_mem);
     defer runtime.deinit();
     runtime.makeCurrent();
     g_js_rt = &runtime;
+    try runtime.installDomStubs();
 
     // Run initialization script
-    try runtime.eval(
-        \\print('hello from mquickjs (Zig stdlib bindings)');
-        \\function animate(ts) {
-        \\  var t = ts * 0.001;
-        \\  var r = 0.4 + 0.4 * Math.sin(t);
-        \\  var g = 0.3 + 0.3 * Math.sin(t + 2.0);
-        \\  var b = 0.5 + 0.3 * Math.sin(t + 4.0);
-        \\  setClearColor(r, g, b);
-        \\  requestAnimationFrame(animate);
-        \\}
-        \\requestAnimationFrame(animate);
-    , "init");
+    if (script_path) |path| {
+        const max_bytes: usize = 16 * 1024 * 1024;
+        const script = try std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+        defer allocator.free(script);
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+        std.debug.print("Loading script: {s}\n", .{path});
+        try runtime.eval(script, path_z);
+    } else {
+        try runtime.eval(
+            \\print('hello from mquickjs (Zig stdlib bindings)');
+            \\function animate(ts) {
+            \\  var t = ts * 0.001;
+            \\  var r = 0.4 + 0.4 * Math.sin(t);
+            \\  var g = 0.3 + 0.3 * Math.sin(t + 2.0);
+            \\  var b = 0.5 + 0.3 * Math.sin(t + 4.0);
+            \\  setClearColor(r, g, b);
+            \\  requestAnimationFrame(animate);
+            \\}
+            \\requestAnimationFrame(animate);
+        , "init");
+    }
 
     // Set up frame callback
     window.setFrameCallback(onFrame);
 
-    // Enable triangle rendering
-    window.setDrawTriangle(true);
+    // Enable triangle rendering unless running an example script
+    window.setDrawTriangle(script_path == null);
 
     // Run the window (blocks until closed)
-    std.debug.print("Opening window with triangle... Press ESC to close.\n", .{});
+    if (script_path != null) {
+        std.debug.print("Opening window... Press ESC to close.\n", .{});
+    } else {
+        std.debug.print("Opening window with triangle... Press ESC to close.\n", .{});
+    }
     window.run(.{
         .width = 800,
         .height = 600,
