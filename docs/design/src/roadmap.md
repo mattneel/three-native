@@ -178,8 +178,8 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [ ] State machine design complete
 
 **Deliverables**
-- [ ] `src/shim/webgl.zig` - type definitions
-- [ ] `src/shim/webgl_state.zig` - state machine types
+- [x] `src/shim/webgl.zig` - type definitions (context handle table)
+- [x] `src/shim/webgl_state.zig` - state machine types (buffer binds)
 - [ ] API coverage spreadsheet (which gl.* calls needed)
 
 **Exit Criteria**
@@ -220,8 +220,8 @@ Verdict: ✓ Negligible vs 16.6ms budget
 - [ ] deleteBuffer works
 
 **Implementation**
-- [ ] Buffer handle allocation
-- [ ] Bind state tracking
+- [x] Buffer handle allocation
+- [x] Bind state tracking
 - [ ] Data upload to sokol buffer
 - [ ] Cleanup on delete
 

@@ -13,6 +13,8 @@ pub const js = @import("runtime/js.zig");
 
 // Shim modules
 pub const globals = @import("shim/globals.zig");
+pub const webgl = @import("shim/webgl.zig");
+pub const webgl_state = @import("shim/webgl_state.zig");
 
 // Re-export main types for convenience
 pub const Window = window.Window;
@@ -21,6 +23,9 @@ pub const ClearColor = window.ClearColor;
 pub const GlobalState = globals.GlobalState;
 pub const TriangleRenderer = renderer.TriangleRenderer;
 pub const JsRuntime = js.Runtime;
+pub const WebGLContextTable = webgl.ContextTable;
+pub const WebGLBufferTable = webgl.BufferTable;
+pub const WebGLBindState = webgl_state.BindState;
 
 test {
     // Run all module tests
