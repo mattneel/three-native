@@ -44,6 +44,7 @@ pub const Runtime = struct {
     timers: [MaxTimers]Timer,
     raf: [MaxRaf]RafEntry,
     next_raf_id: i32,
+    dom_installed: bool,
 
     const Self = @This();
 
@@ -56,7 +57,6 @@ pub const Runtime = struct {
         };
 
         c.JS_SetLogFunc(ctx, logFunc);
-        try installDomStubs(ctx);
 
         return .{
             .ctx = ctx,
@@ -66,6 +66,7 @@ pub const Runtime = struct {
             .timers = [_]Timer{.{}} ** MaxTimers,
             .raf = [_]RafEntry{.{}} ** MaxRaf,
             .next_raf_id = 1,
+            .dom_installed = false,
         };
     }
 
@@ -83,6 +84,7 @@ pub const Runtime = struct {
     }
 
     pub fn eval(self: *Self, code: []const u8, filename: [:0]const u8) !void {
+        try self.ensureDomStubs();
         const val = c.JS_Eval(self.ctx, code.ptr, code.len, filename.ptr, 0);
         if (val == c.JS_EXCEPTION) {
             dumpException(self.ctx);
@@ -91,6 +93,7 @@ pub const Runtime = struct {
     }
 
     pub fn evalInt(self: *Self, code: []const u8, filename: [:0]const u8) !i32 {
+        try self.ensureDomStubs();
         const val = c.JS_Eval(self.ctx, code.ptr, code.len, filename.ptr, c.JS_EVAL_RETVAL);
         if (val == c.JS_EXCEPTION) {
             dumpException(self.ctx);
@@ -107,6 +110,12 @@ pub const Runtime = struct {
         self.shared.time_ms = timestamp_ms;
         self.runTimers(timestamp_ms);
         self.runRaf(timestamp_ms);
+    }
+
+    fn ensureDomStubs(self: *Self) !void {
+        if (self.dom_installed) return;
+        try installDomStubs(self.ctx);
+        self.dom_installed = true;
     }
 
     pub fn getSharedState(self: *Self) *SharedState {
@@ -213,6 +222,51 @@ fn installDomStubs(ctx: *c.JSContext) !void {
         "  }\n" ++
         "  return { style: {}, addEventListener: function(){}, removeEventListener: function(){} };\n" ++
         "};\n" ++
+        "if (typeof gl !== 'undefined') {\n" ++
+        "  if (gl.VERSION === undefined) gl.VERSION = 0x1F02;\n" ++
+        "  if (gl.SHADING_LANGUAGE_VERSION === undefined) gl.SHADING_LANGUAGE_VERSION = 0x8B8C;\n" ++
+        "  if (gl.VENDOR === undefined) gl.VENDOR = 0x1F00;\n" ++
+        "  if (gl.RENDERER === undefined) gl.RENDERER = 0x1F01;\n" ++
+        "  if (gl.MAX_TEXTURE_IMAGE_UNITS === undefined) gl.MAX_TEXTURE_IMAGE_UNITS = 0x8872;\n" ++
+        "  if (gl.MAX_VERTEX_ATTRIBS === undefined) gl.MAX_VERTEX_ATTRIBS = 0x8869;\n" ++
+        "  if (gl.MAX_TEXTURE_SIZE === undefined) gl.MAX_TEXTURE_SIZE = 0x0D33;\n" ++
+        "  if (gl.MAX_CUBE_MAP_TEXTURE_SIZE === undefined) gl.MAX_CUBE_MAP_TEXTURE_SIZE = 0x851C;\n" ++
+        "  if (gl.MAX_VERTEX_UNIFORM_VECTORS === undefined) gl.MAX_VERTEX_UNIFORM_VECTORS = 0x8DFB;\n" ++
+        "  if (gl.MAX_FRAGMENT_UNIFORM_VECTORS === undefined) gl.MAX_FRAGMENT_UNIFORM_VECTORS = 0x8DFD;\n" ++
+        "  if (gl.MAX_VARYING_VECTORS === undefined) gl.MAX_VARYING_VECTORS = 0x8DFC;\n" ++
+        "  if (gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS === undefined) gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS = 0x8B4C;\n" ++
+        "  if (gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS === undefined) gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8B4D;\n" ++
+        "  if (gl.ALIASED_LINE_WIDTH_RANGE === undefined) gl.ALIASED_LINE_WIDTH_RANGE = 0x846E;\n" ++
+        "  if (gl.ALIASED_POINT_SIZE_RANGE === undefined) gl.ALIASED_POINT_SIZE_RANGE = 0x846D;\n" ++
+        "  if (gl.MAX_VIEWPORT_DIMS === undefined) gl.MAX_VIEWPORT_DIMS = 0x0D3A;\n" ++
+        "  if (!gl.getSupportedExtensions) gl.getSupportedExtensions = function(){ return []; };\n" ++
+        "  if (!gl.getExtension) gl.getExtension = function(){ return null; };\n" ++
+        "  if (!gl.getContextAttributes) gl.getContextAttributes = function(){\n" ++
+        "    return { alpha: true, depth: true, stencil: false, antialias: false, premultipliedAlpha: true, preserveDrawingBuffer: false };\n" ++
+        "  };\n" ++
+        "  if (!gl.viewport) gl.viewport = function(x,y,w,h){ gl.drawingBufferWidth = w; gl.drawingBufferHeight = h; };\n" ++
+        "  if (!gl.clearColor) gl.clearColor = function(r,g,b,a){ setClearColor(r,g,b); };\n" ++
+        "  if (!gl.clear) gl.clear = function(mask) { };\n" ++
+        "  if (!gl.getParameter) gl.getParameter = function(p){\n" ++
+        "    if (p === gl.VERSION) return 'WebGL 1.0 (three-native)';\n" ++
+        "    if (p === gl.SHADING_LANGUAGE_VERSION) return 'WebGL GLSL ES 1.0';\n" ++
+        "    if (p === gl.VENDOR) return 'three-native';\n" ++
+        "    if (p === gl.RENDERER) return 'sokol';\n" ++
+        "    if (p === gl.MAX_TEXTURE_IMAGE_UNITS) return 8;\n" ++
+        "    if (p === gl.MAX_VERTEX_ATTRIBS) return 16;\n" ++
+        "    if (p === gl.MAX_TEXTURE_SIZE) return 4096;\n" ++
+        "    if (p === gl.MAX_CUBE_MAP_TEXTURE_SIZE) return 4096;\n" ++
+        "    if (p === gl.MAX_VERTEX_UNIFORM_VECTORS) return 128;\n" ++
+        "    if (p === gl.MAX_FRAGMENT_UNIFORM_VECTORS) return 128;\n" ++
+        "    if (p === gl.MAX_VARYING_VECTORS) return 8;\n" ++
+        "    if (p === gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS) return 8;\n" ++
+        "    if (p === gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) return 8;\n" ++
+        "    if (p === gl.ALIASED_LINE_WIDTH_RANGE) return [1, 1];\n" ++
+        "    if (p === gl.ALIASED_POINT_SIZE_RANGE) return [1, 1];\n" ++
+        "    if (p === gl.MAX_VIEWPORT_DIMS) return [gl.drawingBufferWidth || 800, gl.drawingBufferHeight || 600];\n" ++
+        "    return null;\n" ++
+        "  };\n" ++
+        "}\n" ++
         "_global.document = document;\n";
 
     const val = c.JS_Eval(ctx, script.ptr, script.len, "dom_stubs", 0);
@@ -1252,6 +1306,24 @@ test "document.createElement canvas getContext" {
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_null", "test"));
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_w", "test"));
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_h", "test"));
+}
+
+test "gl capability stubs return defaults" {
+    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.eval(
+        \\var ok_ver = (gl.getParameter(gl.VERSION).indexOf('WebGL') === 0) ? 1 : 0;
+        \\var ok_tex = (gl.getParameter(gl.MAX_TEXTURE_SIZE) >= 1024) ? 1 : 0;
+        \\var ok_ext = (gl.getSupportedExtensions().length === 0) ? 1 : 0;
+        \\var ok_attr = gl.getContextAttributes().alpha ? 1 : 0;
+    , "test");
+
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_ver", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_tex", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_ext", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_attr", "test"));
 }
 
 test "JS gl buffer lifecycle hits backend" {

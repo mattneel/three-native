@@ -16,7 +16,7 @@ blendFuncSeparate,method,webgl1,missing,
 blitFramebuffer,method,webgl2,missing,
 bufferData,method,webgl1,partial,"usage hint ignored"
 bufferSubData,method,webgl1,missing,
-clearColor,method,webgl1,missing,
+clearColor,method,webgl1,partial,"JS shim forwards to setClearColor"
 clearDepth,method,webgl1,missing,
 clearStencil,method,webgl1,missing,
 clientWaitSync,method,webgl2,missing,
@@ -62,10 +62,10 @@ frontFace,method,webgl1,missing,
 generateMipmap,method,webgl1,missing,
 getActiveUniform,method,webgl1,missing,
 getAttribLocation,method,webgl1,implemented,
-getContextAttributes,method,webgl1,missing,
-getExtension,method,webgl1,missing,
+getContextAttributes,method,webgl1,partial,"JS shim returns defaults"
+getExtension,method,webgl1,partial,"JS shim always returns null"
 getError,method,webgl1,missing,
-getParameter,method,webgl1,missing,
+getParameter,method,webgl1,partial,"JS shim returns fixed defaults"
 getProgramInfoLog,method,webgl1,implemented,
 getProgramParameter,method,webgl1,partial,"LINK_STATUS only"
 getQueryParameter,method,webgl2,missing,
@@ -73,6 +73,7 @@ getShaderInfoLog,method,webgl1,implemented,
 getShaderParameter,method,webgl1,partial,"COMPILE_STATUS only"
 getShaderPrecisionFormat,method,webgl1,missing,
 getShaderSource,method,webgl1,missing,
+getSupportedExtensions,method,webgl1,partial,"JS shim returns empty list"
 getUniformBlockIndex,method,webgl2,missing,
 getUniformLocation,method,webgl1,implemented,
 invalidateFramebuffer,method,webgl2,missing,
@@ -132,7 +133,7 @@ vertexAttrib4fv,method,webgl1,missing,
 vertexAttribDivisor,method,webgl2,missing,
 vertexAttribIPointer,method,webgl2,missing,
 vertexAttribPointer,method,webgl1,partial,"limited formats"
-viewport,method,webgl1,missing,
+viewport,method,webgl1,partial,"JS shim updates drawingBuffer size"
 ACTIVE_ATTRIBUTES,constant,webgl1,missing,
 ACTIVE_UNIFORMS,constant,webgl1,missing,
 ALPHA,constant,webgl1,missing,
@@ -186,17 +187,17 @@ LEQUAL,constant,webgl1,missing,
 LESS,constant,webgl1,missing,
 LINK_STATUS,constant,webgl1,implemented,
 MAX,constant,webgl1,missing,
-MAX_COMBINED_TEXTURE_IMAGE_UNITS,constant,webgl1,missing,
-MAX_CUBE_MAP_TEXTURE_SIZE,constant,webgl1,missing,
-MAX_FRAGMENT_UNIFORM_VECTORS,constant,webgl1,missing,
+MAX_COMBINED_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"JS shim default"
+MAX_CUBE_MAP_TEXTURE_SIZE,constant,webgl1,partial,"JS shim default"
+MAX_FRAGMENT_UNIFORM_VECTORS,constant,webgl1,partial,"JS shim default"
 MAX_SAMPLES,constant,webgl2,missing,
-MAX_TEXTURE_IMAGE_UNITS,constant,webgl1,missing,
-MAX_TEXTURE_SIZE,constant,webgl1,missing,
+MAX_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"JS shim default"
+MAX_TEXTURE_SIZE,constant,webgl1,partial,"JS shim default"
 MAX_UNIFORM_BUFFER_BINDINGS,constant,webgl2,missing,
-MAX_VARYING_VECTORS,constant,webgl1,missing,
-MAX_VERTEX_ATTRIBS,constant,webgl1,missing,
-MAX_VERTEX_TEXTURE_IMAGE_UNITS,constant,webgl1,missing,
-MAX_VERTEX_UNIFORM_VECTORS,constant,webgl1,missing,
+MAX_VARYING_VECTORS,constant,webgl1,partial,"JS shim default"
+MAX_VERTEX_ATTRIBS,constant,webgl1,partial,"JS shim default"
+MAX_VERTEX_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"JS shim default"
+MAX_VERTEX_UNIFORM_VECTORS,constant,webgl1,partial,"JS shim default"
 MEDIUM_FLOAT,constant,webgl1,missing,
 MIN,constant,webgl1,missing,
 NEAREST,constant,webgl1,missing,
@@ -307,7 +308,7 @@ UNSIGNED_SHORT,constant,webgl1,implemented,
 UNSIGNED_SHORT_4_4_4_4,constant,webgl1,missing,
 UNSIGNED_SHORT_5_5_5_1,constant,webgl1,missing,
 VALIDATE_STATUS,constant,webgl1,missing,
-VERSION,constant,webgl1,missing,
+VERSION,constant,webgl1,partial,"JS shim default"
 VERTEX_SHADER,constant,webgl1,implemented,
 VIEWPORT,constant,webgl1,missing,
 WAIT_FAILED,constant,webgl2,missing,
