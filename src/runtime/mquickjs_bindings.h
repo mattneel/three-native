@@ -13,6 +13,9 @@ JSValue js_clearTimeout(JSContext *ctx, JSValue *this_val, int argc, JSValue *ar
 JSValue js_setClearColor(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_requestAnimationFrame(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_cancelAnimationFrame(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_dom_noop(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_dom_createElement(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_dom_getContext(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_createBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_deleteBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_bindBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);

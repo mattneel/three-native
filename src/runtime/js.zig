@@ -45,6 +45,7 @@ pub const Runtime = struct {
     raf: [MaxRaf]RafEntry,
     next_raf_id: i32,
     dom_installed: bool,
+    gl_installed: bool,
 
     const Self = @This();
 
@@ -52,6 +53,8 @@ pub const Runtime = struct {
         const mem_buf = try allocator.alloc(u8, mem_size);
         errdefer allocator.free(mem_buf);
 
+        g_js_mutex.lock();
+        defer g_js_mutex.unlock();
         const ctx = c.JS_NewContext(mem_buf.ptr, mem_size, &js_stdlib) orelse {
             return error.ContextCreationFailed;
         };
@@ -67,6 +70,7 @@ pub const Runtime = struct {
             .raf = [_]RafEntry{.{}} ** MaxRaf,
             .next_raf_id = 1,
             .dom_installed = false,
+            .gl_installed = false,
         };
     }
 
@@ -74,17 +78,23 @@ pub const Runtime = struct {
         if (g_runtime == self) {
             g_runtime = null;
         }
+        g_js_mutex.lock();
         c.JS_FreeContext(self.ctx);
+        g_js_mutex.unlock();
         self.allocator.free(self.mem_buf);
     }
 
     pub fn makeCurrent(self: *Self) void {
+        g_js_mutex.lock();
+        defer g_js_mutex.unlock();
         g_runtime = self;
+        c.JS_SetContextOpaque(self.ctx, self);
         g_start_time_ms = std.time.milliTimestamp();
     }
 
     pub fn eval(self: *Self, code: []const u8, filename: [:0]const u8) !void {
-        try self.ensureDomStubs();
+        g_js_mutex.lock();
+        defer g_js_mutex.unlock();
         const val = c.JS_Eval(self.ctx, code.ptr, code.len, filename.ptr, 0);
         if (val == c.JS_EXCEPTION) {
             dumpException(self.ctx);
@@ -93,7 +103,8 @@ pub const Runtime = struct {
     }
 
     pub fn evalInt(self: *Self, code: []const u8, filename: [:0]const u8) !i32 {
-        try self.ensureDomStubs();
+        g_js_mutex.lock();
+        defer g_js_mutex.unlock();
         const val = c.JS_Eval(self.ctx, code.ptr, code.len, filename.ptr, c.JS_EVAL_RETVAL);
         if (val == c.JS_EXCEPTION) {
             dumpException(self.ctx);
@@ -107,15 +118,27 @@ pub const Runtime = struct {
     }
 
     pub fn tick(self: *Self, timestamp_ms: f64) void {
+        g_js_mutex.lock();
+        defer g_js_mutex.unlock();
         self.shared.time_ms = timestamp_ms;
         self.runTimers(timestamp_ms);
         self.runRaf(timestamp_ms);
     }
 
-    fn ensureDomStubs(self: *Self) !void {
+    pub fn installDomStubs(self: *Self) !void {
         if (self.dom_installed) return;
-        try installDomStubs(self.ctx);
+        g_js_mutex.lock();
+        defer g_js_mutex.unlock();
+        try createDomStubs(self.ctx);
         self.dom_installed = true;
+    }
+
+    pub fn installGlStubs(self: *Self) !void {
+        if (self.gl_installed) return;
+        g_js_mutex.lock();
+        defer g_js_mutex.unlock();
+        try evalGlStubsScript(self.ctx);
+        self.gl_installed = true;
     }
 
     pub fn getSharedState(self: *Self) *SharedState {
@@ -174,9 +197,13 @@ pub const Runtime = struct {
 
 var g_runtime: ?*Runtime = null;
 var g_start_time_ms: i64 = 0;
+var g_js_mutex: std.Thread.Mutex = .{};
 
 fn getRuntime(ctx: *c.JSContext) ?*Runtime {
-    _ = ctx;
+    const ctx_opaque = c.JS_GetContextOpaque(ctx);
+    if (ctx_opaque != null) {
+        return @ptrCast(@alignCast(ctx_opaque));
+    }
     return g_runtime;
 }
 
@@ -194,34 +221,33 @@ fn throwInternalError(ctx: *c.JSContext, msg: [:0]const u8) c.JSValue {
     return c.JS_Throw(ctx, c.JS_NewString(ctx, msg.ptr));
 }
 
-fn installDomStubs(ctx: *c.JSContext) !void {
+fn createDomStubs(ctx: *c.JSContext) !void {
+    const global = c.JS_GetGlobalObject(ctx);
+
+    const document = c.JS_NewObject(ctx);
+    const body = c.JS_NewObject(ctx);
+
+    const noop = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
+    _ = c.JS_SetPropertyStr(ctx, body, "appendChild", noop);
+    _ = c.JS_SetPropertyStr(ctx, document, "body", body);
+
+    const create_elem = c.JS_GetPropertyStr(ctx, global, "__dom_createElement");
+    _ = c.JS_SetPropertyStr(ctx, document, "createElement", create_elem);
+
+    _ = c.JS_SetPropertyStr(ctx, global, "document", document);
+
+    const window_obj = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "document", document);
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "devicePixelRatio", c.JS_NewInt32(ctx, 1));
+    const noop_evt = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "addEventListener", noop_evt);
+    const noop_evt2 = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "removeEventListener", noop_evt2);
+    _ = c.JS_SetPropertyStr(ctx, global, "window", window_obj);
+}
+
+fn evalGlStubsScript(ctx: *c.JSContext) !void {
     const script =
-        "var _global = this;\n" ++
-        "if (!_global.globalThis) _global.globalThis = _global;\n" ++
-        "if (!_global.window) _global.window = _global;\n" ++
-        "if (!_global.window.devicePixelRatio) _global.window.devicePixelRatio = 1;\n" ++
-        "if (!_global.window.addEventListener) _global.window.addEventListener = function(){};\n" ++
-        "if (!_global.window.removeEventListener) _global.window.removeEventListener = function(){};\n" ++
-        "var document = _global.document || {};\n" ++
-        "document.body = document.body || { appendChild: function(){} };\n" ++
-        "document.createElement = function(tag){\n" ++
-        "  if (tag === 'canvas') {\n" ++
-        "    var canvas = { width: 800, height: 600, style: {}, addEventListener: function(){}, removeEventListener: function(){} };\n" ++
-        "    canvas.getContext = function(type){\n" ++
-        "      if (type === 'webgl' || type === 'webgl2') {\n" ++
-        "        if (typeof gl !== 'undefined') {\n" ++
-        "          gl.drawingBufferWidth = canvas.width;\n" ++
-        "          gl.drawingBufferHeight = canvas.height;\n" ++
-        "          gl.canvas = canvas;\n" ++
-        "          return gl;\n" ++
-        "        }\n" ++
-        "      }\n" ++
-        "      return null;\n" ++
-        "    };\n" ++
-        "    return canvas;\n" ++
-        "  }\n" ++
-        "  return { style: {}, addEventListener: function(){}, removeEventListener: function(){} };\n" ++
-        "};\n" ++
         "if (typeof gl !== 'undefined') {\n" ++
         "  if (gl.VERSION === undefined) gl.VERSION = 0x1F02;\n" ++
         "  if (gl.SHADING_LANGUAGE_VERSION === undefined) gl.SHADING_LANGUAGE_VERSION = 0x8B8C;\n" ++
@@ -266,10 +292,9 @@ fn installDomStubs(ctx: *c.JSContext) !void {
         "    if (p === gl.MAX_VIEWPORT_DIMS) return [gl.drawingBufferWidth || 800, gl.drawingBufferHeight || 600];\n" ++
         "    return null;\n" ++
         "  };\n" ++
-        "}\n" ++
-        "_global.document = document;\n";
+        "}\n";
 
-    const val = c.JS_Eval(ctx, script.ptr, script.len, "dom_stubs", 0);
+    const val = c.JS_Eval(ctx, script.ptr, script.len, "gl_stubs", 0);
     if (val == c.JS_EXCEPTION) {
         dumpException(ctx);
         return error.EvalFailed;
@@ -550,6 +575,82 @@ export fn js_cancelAnimationFrame(ctx: *c.JSContext, _: *c.JSValue, argc: c_int,
         }
     }
     return c.JS_UNDEFINED;
+}
+
+export fn js_dom_noop(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_UNDEFINED;
+}
+
+export fn js_dom_createElement(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1 or c.JS_IsString(ctx, argv[0]) == 0) {
+        return c.JS_UNDEFINED;
+    }
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[0], &buf);
+    if (c_str == null) return c.JS_UNDEFINED;
+    const tag = @as([*]const u8, @ptrCast(c_str))[0..len];
+
+    const elem = c.JS_NewObject(ctx);
+    const style = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, elem, "style", style);
+
+    const global = c.JS_GetGlobalObject(ctx);
+    const noop = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
+    _ = c.JS_SetPropertyStr(ctx, elem, "addEventListener", noop);
+    const noop2 = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
+    _ = c.JS_SetPropertyStr(ctx, elem, "removeEventListener", noop2);
+
+    if (std.mem.eql(u8, tag, "canvas")) {
+        _ = c.JS_SetPropertyStr(ctx, elem, "width", c.JS_NewInt32(ctx, 800));
+        _ = c.JS_SetPropertyStr(ctx, elem, "height", c.JS_NewInt32(ctx, 600));
+        const get_ctx = c.JS_GetPropertyStr(ctx, global, "__dom_getContext");
+        _ = c.JS_SetPropertyStr(ctx, elem, "getContext", get_ctx);
+    }
+
+    return elem;
+}
+
+export fn js_dom_getContext(ctx: *c.JSContext, this_val: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1 or c.JS_IsString(ctx, argv[0]) == 0) {
+        return c.JS_NULL;
+    }
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[0], &buf);
+    if (c_str == null) return c.JS_NULL;
+    const kind = @as([*]const u8, @ptrCast(c_str))[0..len];
+    if (!(std.mem.eql(u8, kind, "webgl") or std.mem.eql(u8, kind, "webgl2"))) {
+        return c.JS_NULL;
+    }
+
+    const canvas = this_val.*;
+    const existing = c.JS_GetPropertyStr(ctx, canvas, "_ctx");
+    if (c.JS_IsUndefined(existing) == 0 and c.JS_IsNull(existing) == 0) {
+        return existing;
+    }
+
+    const global = c.JS_GetGlobalObject(ctx);
+    const gl_val = c.JS_GetPropertyStr(ctx, global, "gl");
+    if (c.JS_IsUndefined(gl_val) != 0 or c.JS_IsNull(gl_val) != 0) {
+        return c.JS_NULL;
+    }
+
+    const ctx_obj = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "__proto__", gl_val);
+
+    var width: i32 = 0;
+    var height: i32 = 0;
+    const width_val = c.JS_GetPropertyStr(ctx, canvas, "width");
+    _ = c.JS_ToInt32(ctx, &width, width_val);
+    const height_val = c.JS_GetPropertyStr(ctx, canvas, "height");
+    _ = c.JS_ToInt32(ctx, &height, height_val);
+    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "drawingBufferWidth", c.JS_NewInt32(ctx, width));
+    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "drawingBufferHeight", c.JS_NewInt32(ctx, height));
+    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "canvas", canvas);
+
+    _ = c.JS_SetPropertyStr(ctx, canvas, "_ctx", ctx_obj);
+    return ctx_obj;
 }
 
 export fn js_gl_createBuffer(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -1256,13 +1357,17 @@ export fn js_gl_uniform4fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
 const testing = std.testing;
 
 test "Runtime creates and destroys" {
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 }
 
 test "setClearColor updates shared state" {
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 
@@ -1274,7 +1379,9 @@ test "setClearColor updates shared state" {
 }
 
 test "requestAnimationFrame schedules and fires" {
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 
@@ -1286,9 +1393,12 @@ test "requestAnimationFrame schedules and fires" {
 }
 
 test "document.createElement canvas getContext" {
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 128 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
+    try rt.installDomStubs();
 
     try rt.eval(
         \\var c = document.createElement('canvas');
@@ -1309,9 +1419,13 @@ test "document.createElement canvas getContext" {
 }
 
 test "gl capability stubs return defaults" {
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 128 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
+    try rt.installDomStubs();
+    try rt.installGlStubs();
 
     try rt.eval(
         \\var ok_ver = (gl.getParameter(gl.VERSION).indexOf('WebGL') === 0) ? 1 : 0;
@@ -1372,7 +1486,9 @@ test "JS gl buffer lifecycle hits backend" {
     defer mgr.reset();
     try mgr.setBackend(&backend);
 
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 
@@ -1430,7 +1546,9 @@ test "JS gl bufferData accepts typed arrays" {
     defer mgr.reset();
     try mgr.setBackend(&backend);
 
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 
@@ -1458,7 +1576,9 @@ test "JS element array buffer sets index usage" {
     mgr.reset();
     defer mgr.reset();
 
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 
@@ -1480,7 +1600,9 @@ test "JS gl shaderSource stores source" {
     table.reset();
     defer table.reset();
 
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 
@@ -1504,7 +1626,9 @@ test "JS gl compileShader updates status and info log" {
     table.reset();
     defer table.reset();
 
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 
@@ -1537,7 +1661,9 @@ test "JS gl program link status reflects shader state" {
     programs.reset();
     defer programs.reset();
 
-    var rt = try Runtime.init(testing.allocator, 64 * 1024);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
     defer rt.deinit();
     rt.makeCurrent();
 

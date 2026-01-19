@@ -432,6 +432,9 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("setClearColor", 3, js_setClearColor),
     JS_CFUNC_DEF("requestAnimationFrame", 1, js_requestAnimationFrame),
     JS_CFUNC_DEF("cancelAnimationFrame", 1, js_cancelAnimationFrame),
+    JS_CFUNC_DEF("__dom_noop", 0, js_dom_noop),
+    JS_CFUNC_DEF("__dom_createElement", 1, js_dom_createElement),
+    JS_CFUNC_DEF("__dom_getContext", 1, js_dom_getContext),
 #ifdef CONFIG_CLASS_EXAMPLE
     JS_PROP_CLASS_DEF("Rectangle", &js_rectangle_class),
     JS_PROP_CLASS_DEF("FilledRectangle", &js_filled_rectangle_class),
