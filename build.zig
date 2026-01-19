@@ -85,7 +85,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sokol", .module = sokol_dep.module("sokol") },
+        },
     });
+    mod.linkLibrary(sokol_dep.artifact("sokol_clib"));
 
     // ==========================================================================
     // Main executable

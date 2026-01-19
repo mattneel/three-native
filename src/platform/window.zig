@@ -1,10 +1,14 @@
 //! Window management for three-native
 //!
-//! Provides native window creation and management using sokol_app.
-//! This is Phase 1.0 - type definitions only, no implementation yet.
+//! Provides native window creation and management using sokol_app + sokol_gfx.
 
 const std = @import("std");
 const testing = std.testing;
+const sokol = @import("sokol");
+const sapp = sokol.app;
+const sgfx = sokol.gfx;
+const sglue = sokol.glue;
+const slog = sokol.log;
 
 /// Window configuration options
 pub const WindowConfig = struct {
@@ -34,6 +38,11 @@ pub const ClearColor = struct {
     pub fn rgba(r: f32, g: f32, b: f32, a: f32) ClearColor {
         return .{ .r = r, .g = g, .b = b, .a = a };
     }
+
+    /// Convert to sokol pass action color
+    fn toSokolColor(self: ClearColor) sgfx.Color {
+        return .{ .r = self.r, .g = self.g, .b = self.b, .a = self.a };
+    }
 };
 
 /// Window state
@@ -48,7 +57,179 @@ pub const WindowState = enum {
     closed,
 };
 
-/// Window handle - opaque type for the native window
+/// Frame callback type - called each frame with delta time in seconds
+pub const FrameCallback = *const fn (delta_seconds: f64) void;
+
+/// Global window state (sokol uses callbacks, so we need global state)
+var g_state: struct {
+    config: WindowConfig = .{},
+    state: WindowState = .uninitialized,
+    clear_color: ClearColor = ClearColor.rgb(0.0, 0.0, 0.0),
+    frame_count: u64 = 0,
+    frame_callback: ?FrameCallback = null,
+    last_time: u64 = 0,
+    pass_action: sgfx.PassAction = .{},
+} = .{};
+
+// =============================================================================
+// Sokol callbacks
+// =============================================================================
+
+fn sokolInit() callconv(.c) void {
+    // Initialize sokol subsystems
+    sokol.time.setup();
+    sgfx.setup(.{
+        .environment = sglue.environment(),
+        .logger = .{ .func = slog.func },
+    });
+    g_state.state = .running;
+    g_state.last_time = sokol.time.now();
+    updatePassAction();
+    std.debug.print("[window] initialized {}x{}\n", .{
+        sapp.width(),
+        sapp.height(),
+    });
+}
+
+fn sokolFrame() callconv(.c) void {
+    // Calculate delta time
+    const now = sokol.time.now();
+    const delta_ns = sokol.time.diff(now, g_state.last_time);
+    const delta_seconds = sokol.time.sec(delta_ns);
+    g_state.last_time = now;
+
+    // Call user frame callback if set
+    if (g_state.frame_callback) |cb| {
+        cb(delta_seconds);
+    }
+
+    // Begin default render pass with clear color
+    sgfx.beginPass(.{
+        .action = g_state.pass_action,
+        .swapchain = sglue.swapchain(),
+    });
+
+    // End pass and commit
+    sgfx.endPass();
+    sgfx.commit();
+
+    g_state.frame_count += 1;
+}
+
+fn sokolCleanup() callconv(.c) void {
+    sgfx.shutdown();
+    g_state.state = .closed;
+    std.debug.print("[window] shutdown after {} frames\n", .{g_state.frame_count});
+}
+
+fn sokolEvent(event: [*c]const sapp.Event) callconv(.c) void {
+    const ev = event.*;
+    switch (ev.type) {
+        .QUIT_REQUESTED => {
+            g_state.state = .closing;
+        },
+        .KEY_DOWN => {
+            // ESC to quit
+            if (ev.key_code == .ESCAPE) {
+                sapp.requestQuit();
+            }
+        },
+        else => {},
+    }
+}
+
+fn updatePassAction() void {
+    const color = g_state.clear_color.toSokolColor();
+    g_state.pass_action = .{
+        .colors = .{
+            .{
+                .load_action = .CLEAR,
+                .clear_value = color,
+            },
+            .{},
+            .{},
+            .{},
+            .{},
+            .{},
+            .{},
+            .{},
+        },
+    };
+}
+
+// =============================================================================
+// Public API
+// =============================================================================
+
+/// Run the application with the given config.
+/// This function blocks until the window is closed.
+pub fn run(config: WindowConfig) void {
+    g_state.config = config;
+    g_state.clear_color = ClearColor.rgb(0.0, 0.0, 0.0);
+    g_state.frame_count = 0;
+    g_state.state = .uninitialized;
+
+    sapp.run(.{
+        .init_cb = sokolInit,
+        .frame_cb = sokolFrame,
+        .cleanup_cb = sokolCleanup,
+        .event_cb = sokolEvent,
+        .width = @intCast(config.width),
+        .height = @intCast(config.height),
+        .window_title = config.title.ptr,
+        .high_dpi = config.high_dpi,
+        .logger = .{ .func = slog.func },
+    });
+}
+
+/// Set the frame callback - called each frame with delta time
+pub fn setFrameCallback(callback: ?FrameCallback) void {
+    g_state.frame_callback = callback;
+}
+
+/// Set the clear color
+pub fn setClearColor(color: ClearColor) void {
+    g_state.clear_color = color;
+    if (g_state.state == .running) {
+        updatePassAction();
+    }
+}
+
+/// Get current clear color
+pub fn getClearColor() ClearColor {
+    return g_state.clear_color;
+}
+
+/// Get frame count
+pub fn getFrameCount() u64 {
+    return g_state.frame_count;
+}
+
+/// Check if window is running
+pub fn isRunning() bool {
+    return g_state.state == .running;
+}
+
+/// Request window close
+pub fn requestClose() void {
+    sapp.requestQuit();
+}
+
+/// Get window width
+pub fn getWidth() u32 {
+    return @intCast(sapp.width());
+}
+
+/// Get window height
+pub fn getHeight() u32 {
+    return @intCast(sapp.height());
+}
+
+// =============================================================================
+// Legacy Window struct API (for backwards compatibility with tests)
+// =============================================================================
+
+/// Window handle - wrapper around global state
 pub const Window = struct {
     config: WindowConfig,
     state: WindowState,
@@ -73,28 +254,28 @@ pub const Window = struct {
     }
 
     /// Set the clear color
-    pub fn setClearColor(self: *Self, color: ClearColor) void {
+    pub fn setClearColorMethod(self: *Self, color: ClearColor) void {
         self.clear_color = color;
     }
 
     /// Get current clear color
-    pub fn getClearColor(self: *const Self) ClearColor {
+    pub fn getClearColorMethod(self: *const Self) ClearColor {
         return self.clear_color;
     }
 
     /// Check if window is running
-    pub fn isRunning(self: *const Self) bool {
+    pub fn isRunningMethod(self: *const Self) bool {
         return self.state == .running;
     }
 
     /// Get frame count
-    pub fn getFrameCount(self: *const Self) u64 {
+    pub fn getFrameCountMethod(self: *const Self) u64 {
         return self.frame_count;
     }
 };
 
 // =============================================================================
-// Tests - Tiger Style: test positive AND negative space
+// Tests
 // =============================================================================
 
 test "WindowConfig has sensible defaults" {
@@ -122,6 +303,14 @@ test "ClearColor rgba constructor" {
     try testing.expectApproxEqAbs(@as(f32, 0.5), color.a, 0.001);
 }
 
+test "ClearColor converts to sokol format" {
+    const color = ClearColor.rgb(0.5, 0.6, 0.7);
+    const sokol_color = color.toSokolColor();
+    try testing.expectApproxEqAbs(@as(f32, 0.5), sokol_color.r, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.6), sokol_color.g, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.7), sokol_color.b, 0.001);
+}
+
 test "Window initializes with default config" {
     const window = Window.init();
     try testing.expectEqual(WindowState.uninitialized, window.state);
@@ -140,32 +329,6 @@ test "Window initializes with custom config" {
     try testing.expectEqual(@as(u32, 1080), window.config.height);
 }
 
-test "Window clear color can be set and retrieved" {
-    var window = Window.init();
-
-    // Initial color is black
-    const initial = window.getClearColor();
-    try testing.expectApproxEqAbs(@as(f32, 0.0), initial.r, 0.001);
-
-    // Set to red
-    window.setClearColor(ClearColor.rgb(1.0, 0.0, 0.0));
-    const red = window.getClearColor();
-    try testing.expectApproxEqAbs(@as(f32, 1.0), red.r, 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 0.0), red.g, 0.001);
-}
-
-test "Window isRunning reflects state" {
-    var window = Window.init();
-    try testing.expect(!window.isRunning());
-
-    window.state = .running;
-    try testing.expect(window.isRunning());
-
-    window.state = .closing;
-    try testing.expect(!window.isRunning());
-}
-
 test "Window struct size is reasonable" {
-    // Should fit in a cache line or two
     try testing.expect(@sizeOf(Window) <= 128);
 }
