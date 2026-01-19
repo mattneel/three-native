@@ -22,9 +22,11 @@ pub fn build(b: *std.Build) void {
     // ==========================================================================
     // Sokol dependency
     // ==========================================================================
+    // Force OpenGL backend on all platforms for consistent GLSL shader support
     const sokol_dep = b.dependency("sokol", .{
         .target = target,
         .optimize = optimize,
+        .gl = true,
     });
 
     // ==========================================================================
