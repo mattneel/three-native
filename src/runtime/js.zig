@@ -642,8 +642,8 @@ fn sanitizeScriptBytes(allocator: std.mem.Allocator, input: []const u8) !Sanitiz
         return .{ .bytes = input[start..], .owned = false };
     }
 
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
 
     idx = start;
     while (idx < input.len) : (idx += 1) {
@@ -652,16 +652,16 @@ fn sanitizeScriptBytes(allocator: std.mem.Allocator, input: []const u8) !Sanitiz
             if (idx + 1 < input.len and input[idx + 1] == '\n') {
                 idx += 1;
             }
-            try out.append('\n');
+            try out.append(allocator, '\n');
             continue;
         }
         if (b == 0x1A or b == 0x00) {
             continue;
         }
-        try out.append(b);
+        try out.append(allocator, b);
     }
 
-    return .{ .bytes = try out.toOwnedSlice(), .owned = true };
+    return .{ .bytes = try out.toOwnedSlice(allocator), .owned = true };
 }
 
 export fn js_load(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
