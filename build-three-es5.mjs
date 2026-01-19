@@ -66,6 +66,9 @@ output = output.replace(
   /function _classCallCheck\([^)]*\) \{[^}]*\}/,
   "function _classCallCheck() {}"
 );
+// Drop trailing license comment to avoid parser edge cases at EOF.
+output = output.replace(/\/\*\*[\s\S]*?\*\/\s*$/u, "");
+output = output.trimEnd() + "\n";
 await fs.writeFile(outfile, output, "utf8");
 await fs.unlink(temp);
 
