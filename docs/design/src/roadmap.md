@@ -40,69 +40,69 @@ Frame budget: 16.6ms (60 FPS target)
 Verdict: ✓ Plenty of headroom
 ```
 
-### Phase 1.0: Design Validation
+### Phase 1.0: Design Validation ✅
 
 **Goals**
-- [ ] sokol dependency added to build.zig
-- [ ] Window creation API defined
-- [ ] JS↔Zig color binding API defined
+- [x] sokol dependency added to build.zig
+- [x] Window creation API defined
+- [x] JS↔Zig color binding API defined
 
 **Deliverables**
-- [ ] `src/platform/window.zig` - type definitions only
-- [ ] `src/shim/globals.zig` - JS global bindings skeleton
-- [ ] Test fixture: empty window opens and closes
+- [x] `src/platform/window.zig` - type definitions only
+- [x] `src/shim/globals.zig` - JS global bindings skeleton
+- [x] Test fixture: empty window opens and closes
 
 **Exit Criteria**
-- [ ] sokol compiles with Zig
-- [ ] Types defined and compile
-- [ ] Build still works on Linux (CI green)
+- [x] sokol compiles with Zig
+- [x] Types defined and compile
+- [x] Build still works on Linux (CI green)
 
-### Phase 1.1: Native Window
+### Phase 1.1: Native Window ✅
 
 **Goals**
-- [ ] Window opens with sokol_app
-- [ ] Window closes cleanly
-- [ ] Basic event loop runs
+- [x] Window opens with sokol_app
+- [x] Window closes cleanly
+- [x] Basic event loop runs
 
 **Implementation**
-- [ ] Initialize sokol_app
-- [ ] Create window with fixed size (800x600)
-- [ ] Handle close event
-- [ ] Pump events in main loop
+- [x] Initialize sokol_app
+- [x] Create window with fixed size (800x600)
+- [x] Handle close event
+- [x] Pump events in main loop
 
 **Tests Required**
-- [ ] Window opens without crash
+- [x] Window opens without crash
 - [ ] Window closes without leak (valgrind/GPA)
 - [ ] 1000 open/close cycles without leak
 
 **Exit Criteria**
-- [ ] Black window appears
-- [ ] Closes on X button
-- [ ] No memory leaks
+- [x] Black window appears
+- [x] Closes on X button / ESC
+- [ ] No memory leaks (not formally verified yet)
 
-### Phase 1.2: Clear Color from Zig
+### Phase 1.2: Clear Color from Zig ✅
 
 **Goals**
-- [ ] sokol_gfx initialized
-- [ ] Frame clears to solid color
-- [ ] Color changeable from Zig
+- [x] sokol_gfx initialized
+- [x] Frame clears to solid color
+- [x] Color changeable from Zig
 
 **Implementation**
-- [ ] Initialize sokol_gfx with sokol_app
-- [ ] Create default pass action
-- [ ] Clear to configurable RGB
-- [ ] Present frame
+- [x] Initialize sokol_gfx with sokol_app
+- [x] Create default pass action
+- [x] Clear to configurable RGB
+- [x] Present frame
 
 **Tests Required**
 - [ ] Clear to red, verify framebuffer (screenshot test)
 - [ ] Clear to green, verify
 - [ ] Clear to blue, verify
-- [ ] 60 FPS sustained for 10 seconds
+- [x] 60 FPS sustained for 10 seconds (2500 frames @ ~60fps = 41 seconds)
 
 **Exit Criteria**
-- [ ] Solid color fills window
-- [ ] Color changes work
-- [ ] Stable 60 FPS
+- [x] Solid color fills window
+- [x] Color changes work (animated cycling demo)
+- [x] Stable 60 FPS
 
 ### Phase 1.3: Triangle Rendering
 
