@@ -72,8 +72,8 @@ Three.js touches these browser APIs:
 ### M1: Triangle (In Progress)
 - [x] sokol dependency added, types defined (Phase 1.0)
 - [x] sokol_gfx window opens (Phase 1.1)
-- [ ] Hardcoded triangle renders
-- [ ] JS controls clear color
+- [x] Hardcoded triangle renders (Phase 1.3)
+- [ ] JS controls clear color (Phase 1.4)
 
 ### M2: Cube via Shim
 - [ ] WebGLRenderingContext shim (subset)

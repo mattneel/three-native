@@ -6,6 +6,7 @@ const std = @import("std");
 
 // Platform modules
 pub const window = @import("platform/window.zig");
+pub const renderer = @import("platform/renderer.zig");
 
 // Shim modules
 pub const globals = @import("shim/globals.zig");
@@ -15,6 +16,7 @@ pub const Window = window.Window;
 pub const WindowConfig = window.WindowConfig;
 pub const ClearColor = window.ClearColor;
 pub const GlobalState = globals.GlobalState;
+pub const TriangleRenderer = renderer.TriangleRenderer;
 
 test {
     // Run all module tests

@@ -9,6 +9,7 @@ const sapp = sokol.app;
 const sgfx = sokol.gfx;
 const sglue = sokol.glue;
 const slog = sokol.log;
+const TriangleRenderer = @import("renderer.zig").TriangleRenderer;
 
 /// Window configuration options
 pub const WindowConfig = struct {
@@ -69,6 +70,8 @@ var g_state: struct {
     frame_callback: ?FrameCallback = null,
     last_time: u64 = 0,
     pass_action: sgfx.PassAction = .{},
+    triangle_renderer: ?TriangleRenderer = null,
+    draw_triangle: bool = false,
 } = .{};
 
 // =============================================================================
@@ -82,6 +85,10 @@ fn sokolInit() callconv(.c) void {
         .environment = sglue.environment(),
         .logger = .{ .func = slog.func },
     });
+
+    // Initialize triangle renderer
+    g_state.triangle_renderer = TriangleRenderer.init();
+
     g_state.state = .running;
     g_state.last_time = sokol.time.now();
     updatePassAction();
@@ -109,6 +116,13 @@ fn sokolFrame() callconv(.c) void {
         .swapchain = sglue.swapchain(),
     });
 
+    // Draw triangle if enabled
+    if (g_state.draw_triangle) {
+        if (g_state.triangle_renderer) |renderer| {
+            renderer.draw();
+        }
+    }
+
     // End pass and commit
     sgfx.endPass();
     sgfx.commit();
@@ -117,6 +131,12 @@ fn sokolFrame() callconv(.c) void {
 }
 
 fn sokolCleanup() callconv(.c) void {
+    // Cleanup triangle renderer
+    if (g_state.triangle_renderer) |*renderer| {
+        renderer.deinit();
+        g_state.triangle_renderer = null;
+    }
+
     sgfx.shutdown();
     g_state.state = .closed;
     std.debug.print("[window] shutdown after {} frames\n", .{g_state.frame_count});
@@ -213,6 +233,11 @@ pub fn isRunning() bool {
 /// Request window close
 pub fn requestClose() void {
     sapp.requestQuit();
+}
+
+/// Enable or disable triangle rendering
+pub fn setDrawTriangle(enabled: bool) void {
+    g_state.draw_triangle = enabled;
 }
 
 /// Get window width

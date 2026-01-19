@@ -13,10 +13,10 @@ var g_time: f64 = 0;
 fn onFrame(delta: f64) void {
     g_time += delta;
 
-    // Cycle clear color based on time (for demo)
-    const r: f32 = @floatCast(0.5 + 0.5 * @sin(g_time));
-    const g: f32 = @floatCast(0.5 + 0.5 * @sin(g_time + 2.0));
-    const b: f32 = @floatCast(0.5 + 0.5 * @sin(g_time + 4.0));
+    // Slowly cycle background color (darker so triangle is visible)
+    const r: f32 = @floatCast(0.1 + 0.1 * @sin(g_time * 0.5));
+    const g: f32 = @floatCast(0.1 + 0.1 * @sin(g_time * 0.5 + 2.0));
+    const b: f32 = @floatCast(0.2 + 0.1 * @sin(g_time * 0.5 + 4.0));
     window.setClearColor(window.ClearColor.rgb(r, g, b));
 }
 
@@ -39,8 +39,11 @@ pub fn main() !void {
     // Set up frame callback
     window.setFrameCallback(onFrame);
 
+    // Enable triangle rendering
+    window.setDrawTriangle(true);
+
     // Run the window (blocks until closed)
-    std.debug.print("Opening window... Press ESC to close.\n", .{});
+    std.debug.print("Opening window with triangle... Press ESC to close.\n", .{});
     window.run(.{
         .width = 800,
         .height = 600,
