@@ -10,6 +10,8 @@ const sgfx = sokol.gfx;
 const sglue = sokol.glue;
 const slog = sokol.log;
 const TriangleRenderer = @import("renderer.zig").TriangleRenderer;
+const webgl_state = @import("../shim/webgl_state.zig");
+const webgl_backend = @import("../shim/webgl_backend.zig");
 
 /// Window configuration options
 pub const WindowConfig = struct {
@@ -85,6 +87,9 @@ fn sokolInit() callconv(.c) void {
         .environment = sglue.environment(),
         .logger = .{ .func = slog.func },
     });
+
+    // Wire WebGL buffer backend to sokol
+    webgl_state.globalBufferManager().setBackend(webgl_backend.getSokolBackend());
 
     // Initialize triangle renderer
     g_state.triangle_renderer = TriangleRenderer.init();

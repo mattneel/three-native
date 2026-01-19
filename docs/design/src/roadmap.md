@@ -222,8 +222,11 @@ Verdict: ✓ Negligible vs 16.6ms budget
 **Implementation**
 - [x] Buffer handle allocation
 - [x] Bind state tracking
-- [ ] Data upload to sokol buffer
-- [ ] Cleanup on delete
+- [x] Buffer data tracking (size + update count)
+- [x] Native buffer API (create/bind/data/delete)
+- [x] Sokol buffer backend adapter (not wired to JS yet)
+- [x] Data upload path wired to sokol (backend set in window init)
+- [x] Cleanup on delete (handle + bind state)
 
 **Tests Required**
 - [ ] Create 1000 buffers, no leak

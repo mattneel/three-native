@@ -15,6 +15,7 @@ pub const js = @import("runtime/js.zig");
 pub const globals = @import("shim/globals.zig");
 pub const webgl = @import("shim/webgl.zig");
 pub const webgl_state = @import("shim/webgl_state.zig");
+pub const webgl_backend = @import("shim/webgl_backend.zig");
 
 // Re-export main types for convenience
 pub const Window = window.Window;
@@ -26,6 +27,8 @@ pub const JsRuntime = js.Runtime;
 pub const WebGLContextTable = webgl.ContextTable;
 pub const WebGLBufferTable = webgl.BufferTable;
 pub const WebGLBindState = webgl_state.BindState;
+pub const WebGLBufferManager = webgl_state.BufferManager;
+pub const WebGLSokolBackend = webgl_backend.sokolBufferBackend;
 
 test {
     // Run all module tests

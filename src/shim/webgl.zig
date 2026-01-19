@@ -110,6 +110,16 @@ pub const ContextTable = struct {
 // =============================================================================
 
 pub const MaxBuffers: usize = 256;
+pub const MaxBufferBytes: usize = 16 * 1024 * 1024;
+
+pub const BufferBackend = struct {
+    pub const Handle = u32;
+
+    ctx: ?*anyopaque,
+    create: *const fn (ctx: ?*anyopaque, size: usize, usage: BufferUsage) Handle,
+    update: *const fn (ctx: ?*anyopaque, handle: Handle, data: []const u8) void,
+    destroy: *const fn (ctx: ?*anyopaque, handle: Handle) void,
+};
 
 pub const BufferId = packed struct(u32) {
     index: u16,
@@ -131,6 +141,9 @@ pub const Buffer = struct {
     id: BufferId,
     size: u32,
     usage: BufferUsage,
+    data_len: u32,
+    update_count: u32,
+    backend: BufferBackend.Handle,
 };
 
 pub const BufferTable = struct {
@@ -158,6 +171,9 @@ pub const BufferTable = struct {
                     },
                     .size = 0,
                     .usage = .vertex,
+                    .data_len = 0,
+                    .update_count = 0,
+                    .backend = 0,
                 },
             };
         }
@@ -185,6 +201,9 @@ pub const BufferTable = struct {
                     .id = id,
                     .size = desc.size,
                     .usage = desc.usage,
+                    .data_len = 0,
+                    .update_count = 0,
+                    .backend = 0,
                 };
                 entry.active = true;
                 self.count += 1;
@@ -204,6 +223,17 @@ pub const BufferTable = struct {
         var entry = &self.entries[id.index];
         entry.active = false;
         entry.generation +%= 1;
+        entry.buffer = .{
+            .id = .{
+                .index = id.index,
+                .generation = 0,
+            },
+            .size = 0,
+            .usage = .vertex,
+            .data_len = 0,
+            .update_count = 0,
+            .backend = 0,
+        };
         self.count -= 1;
         return true;
     }
@@ -212,6 +242,41 @@ pub const BufferTable = struct {
         if (id.index >= MaxBuffers) return false;
         const entry = &self.entries[id.index];
         return entry.active and entry.generation == id.generation;
+    }
+
+    pub fn updateData(self: *Self, id: BufferId, data: []const u8) !void {
+        if (!self.isValid(id)) return error.InvalidHandle;
+        if (data.len > MaxBufferBytes) return error.TooLarge;
+        var buffer = &self.entries[id.index].buffer;
+        buffer.size = @intCast(data.len);
+        buffer.data_len = @intCast(data.len);
+        buffer.update_count +%= 1;
+    }
+
+    pub fn uploadData(self: *Self, id: BufferId, data: []const u8, backend: *const BufferBackend) !void {
+        if (!self.isValid(id)) return error.InvalidHandle;
+        if (data.len > MaxBufferBytes) return error.TooLarge;
+
+        var buffer = &self.entries[id.index].buffer;
+        if (buffer.backend == 0) {
+            const handle = backend.create(backend.ctx, data.len, buffer.usage);
+            if (handle == 0) return error.BackendFailed;
+            buffer.backend = handle;
+        }
+        backend.update(backend.ctx, buffer.backend, data);
+
+        buffer.size = @intCast(data.len);
+        buffer.data_len = @intCast(data.len);
+        buffer.update_count +%= 1;
+    }
+
+    pub fn freeWithBackend(self: *Self, id: BufferId, backend: *const BufferBackend) bool {
+        if (!self.isValid(id)) return false;
+        const entry = &self.entries[id.index];
+        if (entry.buffer.backend != 0) {
+            backend.destroy(backend.ctx, entry.buffer.backend);
+        }
+        return self.free(id);
     }
 };
 
@@ -277,6 +342,8 @@ test "BufferTable allocates and frees" {
     const buf = table.get(id) orelse return error.UnexpectedNull;
     try testing.expectEqual(@as(u32, 1024), buf.size);
     try testing.expectEqual(BufferUsage.vertex, buf.usage);
+    try testing.expectEqual(@as(u32, 0), buf.data_len);
+    try testing.expectEqual(@as(u32, 0), buf.update_count);
 
     try testing.expect(table.free(id));
     try testing.expectEqual(@as(u16, 0), table.count);
@@ -310,4 +377,110 @@ test "BufferTable free rejects invalid handles" {
     const id = try table.alloc(.{});
     try testing.expect(table.free(id));
     try testing.expect(!table.free(id));
+}
+
+test "BufferTable free resets buffer state" {
+    var table = BufferTable.init();
+    const id = try table.alloc(.{ .size = 128, .usage = .vertex });
+    const data = [_]u8{0} ** 64;
+    try table.updateData(id, data[0..]);
+
+    try testing.expect(table.free(id));
+    const entry = table.entries[id.index];
+    try testing.expect(!entry.active);
+    try testing.expectEqual(@as(u32, 0), entry.buffer.size);
+    try testing.expectEqual(@as(u32, 0), entry.buffer.data_len);
+    try testing.expectEqual(@as(u32, 0), entry.buffer.update_count);
+}
+
+test "BufferTable updateData updates size and count" {
+    var table = BufferTable.init();
+    const id = try table.alloc(.{});
+
+    const data_a = [_]u8{0} ** 128;
+    try table.updateData(id, data_a[0..]);
+    const buf = table.get(id) orelse return error.UnexpectedNull;
+    try testing.expectEqual(@as(u32, 128), buf.size);
+    try testing.expectEqual(@as(u32, 128), buf.data_len);
+    try testing.expectEqual(@as(u32, 1), buf.update_count);
+
+    const data_b = [_]u8{0} ** 256;
+    try table.updateData(id, data_b[0..]);
+    try testing.expectEqual(@as(u32, 256), buf.size);
+    try testing.expectEqual(@as(u32, 256), buf.data_len);
+    try testing.expectEqual(@as(u32, 2), buf.update_count);
+}
+
+test "BufferTable updateData rejects oversize" {
+    var table = BufferTable.init();
+    const id = try table.alloc(.{});
+    const data = try testing.allocator.alloc(u8, MaxBufferBytes + 1);
+    defer testing.allocator.free(data);
+    try testing.expectError(error.TooLarge, table.updateData(id, data));
+}
+
+test "BufferTable uploadData uses backend once" {
+    const BackendStub = struct {
+        create_calls: u32 = 0,
+        update_calls: u32 = 0,
+        destroy_calls: u32 = 0,
+        last_size: usize = 0,
+        last_usage: BufferUsage = .vertex,
+        last_handle: BufferBackend.Handle = 0,
+        last_update_len: usize = 0,
+        next_handle: BufferBackend.Handle = 1,
+
+        const Self = @This();
+
+        fn create(ctx: ?*anyopaque, size: usize, usage: BufferUsage) BufferBackend.Handle {
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.create_calls += 1;
+            self.last_size = size;
+            self.last_usage = usage;
+            const handle = self.next_handle;
+            self.next_handle += 1;
+            self.last_handle = handle;
+            return handle;
+        }
+
+        fn update(ctx: ?*anyopaque, handle: BufferBackend.Handle, data: []const u8) void {
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.update_calls += 1;
+            self.last_handle = handle;
+            self.last_update_len = data.len;
+        }
+
+        fn destroy(ctx: ?*anyopaque, handle: BufferBackend.Handle) void {
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.destroy_calls += 1;
+            self.last_handle = handle;
+        }
+    };
+
+    var table = BufferTable.init();
+    var stub = BackendStub{};
+    const backend = BufferBackend{
+        .ctx = &stub,
+        .create = BackendStub.create,
+        .update = BackendStub.update,
+        .destroy = BackendStub.destroy,
+    };
+
+    const id = try table.alloc(.{ .usage = .vertex });
+    const data_a = [_]u8{0} ** 32;
+    try table.uploadData(id, data_a[0..], &backend);
+    try testing.expectEqual(@as(u32, 1), stub.create_calls);
+    try testing.expectEqual(@as(u32, 1), stub.update_calls);
+    try testing.expectEqual(@as(usize, 32), stub.last_update_len);
+
+    const buf = table.get(id) orelse return error.UnexpectedNull;
+    try testing.expect(buf.backend != 0);
+
+    const data_b = [_]u8{0} ** 64;
+    try table.uploadData(id, data_b[0..], &backend);
+    try testing.expectEqual(@as(u32, 1), stub.create_calls);
+    try testing.expectEqual(@as(u32, 2), stub.update_calls);
+
+    try testing.expect(table.freeWithBackend(id, &backend));
+    try testing.expectEqual(@as(u32, 1), stub.destroy_calls);
 }
