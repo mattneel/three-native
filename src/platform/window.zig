@@ -121,8 +121,9 @@ fn sokolFrame() callconv(.c) void {
     }
 
     // Begin default render pass with clear color
+    const pass_action = webgl_draw.consumePassAction(g_state.pass_action);
     sgfx.beginPass(.{
-        .action = g_state.pass_action,
+        .action = pass_action,
         .swapchain = sglue.swapchain(),
     });
 

@@ -9,18 +9,19 @@ bindRenderbuffer,method,webgl1,missing,
 bindTexture,method,webgl1,missing,
 bindVertexArray,method,webgl1,missing,
 blendColor,method,webgl1,missing,
-blendEquation,method,webgl1,missing,
-blendEquationSeparate,method,webgl1,missing,
-blendFunc,method,webgl1,missing,
-blendFuncSeparate,method,webgl1,missing,
+blendEquation,method,webgl1,partial,"applied in pipeline"
+blendEquationSeparate,method,webgl1,partial,"applied in pipeline"
+blendFunc,method,webgl1,partial,"applied in pipeline"
+blendFuncSeparate,method,webgl1,partial,"applied in pipeline"
 blitFramebuffer,method,webgl2,missing,
 bufferData,method,webgl1,partial,"usage hint ignored"
 bufferSubData,method,webgl1,missing,
-clearColor,method,webgl1,partial,"JS shim forwards to setClearColor"
-clearDepth,method,webgl1,missing,
-clearStencil,method,webgl1,missing,
+clear,method,webgl1,partial,"clears next pass"
+clearColor,method,webgl1,partial,"state only"
+clearDepth,method,webgl1,partial,"state only"
+clearStencil,method,webgl1,partial,"state only"
 clientWaitSync,method,webgl2,missing,
-colorMask,method,webgl1,missing,
+colorMask,method,webgl1,partial,"applied in pipeline"
 compressedTexImage2D,method,webgl1,missing,
 compressedTexImage3D,method,webgl2,missing,
 compressedTexSubImage2D,method,webgl1,missing,
@@ -34,7 +35,7 @@ createRenderbuffer,method,webgl1,missing,
 createShader,method,webgl1,implemented,
 createTexture,method,webgl1,missing,
 createVertexArray,method,webgl1,missing,
-cullFace,method,webgl1,missing,
+cullFace,method,webgl1,partial,"applied in pipeline"
 deleteBuffer,method,webgl1,implemented,
 deleteFramebuffer,method,webgl1,missing,
 deleteProgram,method,webgl1,implemented,
@@ -44,51 +45,51 @@ deleteShader,method,webgl1,implemented,
 deleteSync,method,webgl2,missing,
 deleteTexture,method,webgl1,missing,
 deleteVertexArray,method,webgl1,missing,
-depthFunc,method,webgl1,missing,
-depthMask,method,webgl1,missing,
-disable,method,webgl1,missing,
+depthFunc,method,webgl1,partial,"applied in pipeline"
+depthMask,method,webgl1,partial,"applied in pipeline"
+disable,method,webgl1,partial,"state + pipeline"
 disableVertexAttribArray,method,webgl1,implemented,
 drawArrays,method,webgl1,implemented,
 drawArraysInstanced,method,webgl2,missing,
 drawBuffers,method,webgl2,missing,
 drawElements,method,webgl1,implemented,
 drawElementsInstanced,method,webgl2,missing,
-enable,method,webgl1,missing,
+enable,method,webgl1,partial,"state + pipeline"
 enableVertexAttribArray,method,webgl1,implemented,
 fenceSync,method,webgl2,missing,
 framebufferRenderbuffer,method,webgl1,missing,
 framebufferTexture2D,method,webgl1,missing,
-frontFace,method,webgl1,missing,
+frontFace,method,webgl1,partial,"applied in pipeline"
 generateMipmap,method,webgl1,missing,
 getActiveUniform,method,webgl1,missing,
 getAttribLocation,method,webgl1,implemented,
-getContextAttributes,method,webgl1,partial,"JS shim returns defaults"
-getExtension,method,webgl1,partial,"JS shim always returns null"
-getError,method,webgl1,missing,
-getParameter,method,webgl1,partial,"JS shim returns fixed defaults"
+getContextAttributes,method,webgl1,partial,"returns defaults"
+getExtension,method,webgl1,partial,"always null"
+getError,method,webgl1,partial,"always NO_ERROR"
+getParameter,method,webgl1,partial,"returns defaults"
 getProgramInfoLog,method,webgl1,implemented,
 getProgramParameter,method,webgl1,partial,"LINK_STATUS only"
 getQueryParameter,method,webgl2,missing,
 getShaderInfoLog,method,webgl1,implemented,
 getShaderParameter,method,webgl1,partial,"COMPILE_STATUS only"
-getShaderPrecisionFormat,method,webgl1,missing,
+getShaderPrecisionFormat,method,webgl1,partial,"fixed precision values"
 getShaderSource,method,webgl1,missing,
-getSupportedExtensions,method,webgl1,partial,"JS shim returns empty list"
+getSupportedExtensions,method,webgl1,partial,"returns empty list"
 getUniformBlockIndex,method,webgl2,missing,
 getUniformLocation,method,webgl1,implemented,
 invalidateFramebuffer,method,webgl2,missing,
 linkProgram,method,webgl1,implemented,
-lineWidth,method,webgl1,missing,
+lineWidth,method,webgl1,partial,"state only"
 makeXRCompatible,method,webgl1,missing,
-pixelStorei,method,webgl1,missing,
-polygonOffset,method,webgl1,missing,
+pixelStorei,method,webgl1,partial,"state only"
+polygonOffset,method,webgl1,partial,"applied in pipeline"
 renderbufferStorage,method,webgl1,missing,
 renderbufferStorageMultisample,method,webgl2,missing,
-scissor,method,webgl1,missing,
+scissor,method,webgl1,partial,"applied in draw pass"
 shaderSource,method,webgl1,implemented,
-stencilFunc,method,webgl1,missing,
-stencilMask,method,webgl1,missing,
-stencilOp,method,webgl1,missing,
+stencilFunc,method,webgl1,partial,"applied in pipeline"
+stencilMask,method,webgl1,partial,"applied in pipeline"
+stencilOp,method,webgl1,partial,"applied in pipeline"
 texImage2D,method,webgl1,missing,
 texImage3D,method,webgl2,missing,
 texParameterf,method,webgl1,missing,
@@ -133,84 +134,84 @@ vertexAttrib4fv,method,webgl1,missing,
 vertexAttribDivisor,method,webgl2,missing,
 vertexAttribIPointer,method,webgl2,missing,
 vertexAttribPointer,method,webgl1,partial,"limited formats"
-viewport,method,webgl1,partial,"JS shim updates drawingBuffer size"
+viewport,method,webgl1,partial,"applied in draw pass"
 ACTIVE_ATTRIBUTES,constant,webgl1,missing,
 ACTIVE_UNIFORMS,constant,webgl1,missing,
 ALPHA,constant,webgl1,missing,
-ALWAYS,constant,webgl1,missing,
+ALWAYS,constant,webgl1,implemented,
 ARRAY_BUFFER,constant,webgl1,implemented,
-BACK,constant,webgl1,missing,
-BLEND,constant,webgl1,missing,
+BACK,constant,webgl1,implemented,
+BLEND,constant,webgl1,implemented,
 BYTE,constant,webgl1,missing,
-CCW,constant,webgl1,missing,
+CCW,constant,webgl1,implemented,
 COLOR_ATTACHMENT0,constant,webgl1,missing,
-COLOR_BUFFER_BIT,constant,webgl1,missing,
+COLOR_BUFFER_BIT,constant,webgl1,implemented,
 COMPARE_REF_TO_TEXTURE,constant,webgl1,missing,
 COMPLETION_STATUS_KHR,constant,webgl1,missing,
 COMPILE_STATUS,constant,webgl1,implemented,
-CONSTANT_ALPHA,constant,webgl1,missing,
-CONSTANT_COLOR,constant,webgl1,missing,
-CULL_FACE,constant,webgl1,missing,
-CW,constant,webgl1,missing,
+CONSTANT_ALPHA,constant,webgl1,implemented,
+CONSTANT_COLOR,constant,webgl1,implemented,
+CULL_FACE,constant,webgl1,implemented,
+CW,constant,webgl1,implemented,
 DEPTH_ATTACHMENT,constant,webgl1,missing,
-DEPTH_BUFFER_BIT,constant,webgl1,missing,
+DEPTH_BUFFER_BIT,constant,webgl1,implemented,
 DEPTH_COMPONENT,constant,webgl1,missing,
 DEPTH_COMPONENT24,constant,webgl2,missing,
 DEPTH_COMPONENT32F,constant,webgl2,missing,
 DEPTH_STENCIL,constant,webgl1,missing,
 DEPTH_STENCIL_ATTACHMENT,constant,webgl1,missing,
-DEPTH_TEST,constant,webgl1,missing,
+DEPTH_TEST,constant,webgl1,implemented,
 DEPTH24_STENCIL8,constant,webgl2,missing,
 DEPTH32F_STENCIL8,constant,webgl2,missing,
-DST_ALPHA,constant,webgl1,missing,
-DST_COLOR,constant,webgl1,missing,
+DST_ALPHA,constant,webgl1,implemented,
+DST_COLOR,constant,webgl1,implemented,
 DRAW_FRAMEBUFFER,constant,webgl2,missing,
 ELEMENT_ARRAY_BUFFER,constant,webgl1,implemented,
-EQUAL,constant,webgl1,missing,
+EQUAL,constant,webgl1,implemented,
 FRAGMENT_SHADER,constant,webgl1,implemented,
 FRAMEBUFFER,constant,webgl1,missing,
-FRONT,constant,webgl1,missing,
-FRONT_AND_BACK,constant,webgl1,missing,
-FUNC_ADD,constant,webgl1,missing,
-FUNC_REVERSE_SUBTRACT,constant,webgl1,missing,
-FUNC_SUBTRACT,constant,webgl1,missing,
+FRONT,constant,webgl1,implemented,
+FRONT_AND_BACK,constant,webgl1,implemented,
+FUNC_ADD,constant,webgl1,implemented,
+FUNC_REVERSE_SUBTRACT,constant,webgl1,implemented,
+FUNC_SUBTRACT,constant,webgl1,implemented,
 FLOAT,constant,webgl1,implemented,
-GEQUAL,constant,webgl1,missing,
-GREATER,constant,webgl1,missing,
+GEQUAL,constant,webgl1,implemented,
+GREATER,constant,webgl1,implemented,
 HALF_FLOAT,constant,webgl1,missing,
 HIGH_FLOAT,constant,webgl1,missing,
-IMPLEMENTATION_COLOR_READ_FORMAT,constant,webgl1,missing,
-IMPLEMENTATION_COLOR_READ_TYPE,constant,webgl1,missing,
+IMPLEMENTATION_COLOR_READ_FORMAT,constant,webgl1,partial,"default value"
+IMPLEMENTATION_COLOR_READ_TYPE,constant,webgl1,partial,"default value"
 INT,constant,webgl1,missing,
 KEEP,constant,webgl1,missing,
-LEQUAL,constant,webgl1,missing,
-LESS,constant,webgl1,missing,
+LEQUAL,constant,webgl1,implemented,
+LESS,constant,webgl1,implemented,
 LINK_STATUS,constant,webgl1,implemented,
 MAX,constant,webgl1,missing,
-MAX_COMBINED_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"JS shim default"
-MAX_CUBE_MAP_TEXTURE_SIZE,constant,webgl1,partial,"JS shim default"
-MAX_FRAGMENT_UNIFORM_VECTORS,constant,webgl1,partial,"JS shim default"
-MAX_SAMPLES,constant,webgl2,missing,
-MAX_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"JS shim default"
-MAX_TEXTURE_SIZE,constant,webgl1,partial,"JS shim default"
+MAX_COMBINED_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"default value"
+MAX_CUBE_MAP_TEXTURE_SIZE,constant,webgl1,partial,"default value"
+MAX_FRAGMENT_UNIFORM_VECTORS,constant,webgl1,partial,"default value"
+MAX_SAMPLES,constant,webgl2,implemented,
+MAX_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"default value"
+MAX_TEXTURE_SIZE,constant,webgl1,partial,"default value"
 MAX_UNIFORM_BUFFER_BINDINGS,constant,webgl2,missing,
-MAX_VARYING_VECTORS,constant,webgl1,partial,"JS shim default"
-MAX_VERTEX_ATTRIBS,constant,webgl1,partial,"JS shim default"
-MAX_VERTEX_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"JS shim default"
-MAX_VERTEX_UNIFORM_VECTORS,constant,webgl1,partial,"JS shim default"
+MAX_VARYING_VECTORS,constant,webgl1,partial,"default value"
+MAX_VERTEX_ATTRIBS,constant,webgl1,partial,"default value"
+MAX_VERTEX_TEXTURE_IMAGE_UNITS,constant,webgl1,partial,"default value"
+MAX_VERTEX_UNIFORM_VECTORS,constant,webgl1,partial,"default value"
 MEDIUM_FLOAT,constant,webgl1,missing,
 MIN,constant,webgl1,missing,
 NEAREST,constant,webgl1,missing,
-NEVER,constant,webgl1,missing,
-NOTEQUAL,constant,webgl1,missing,
-ONE,constant,webgl1,missing,
-ONE_MINUS_CONSTANT_ALPHA,constant,webgl1,missing,
-ONE_MINUS_CONSTANT_COLOR,constant,webgl1,missing,
-ONE_MINUS_DST_ALPHA,constant,webgl1,missing,
-ONE_MINUS_DST_COLOR,constant,webgl1,missing,
-ONE_MINUS_SRC_ALPHA,constant,webgl1,missing,
-ONE_MINUS_SRC_COLOR,constant,webgl1,missing,
-POLYGON_OFFSET_FILL,constant,webgl1,missing,
+NEVER,constant,webgl1,implemented,
+NOTEQUAL,constant,webgl1,implemented,
+ONE,constant,webgl1,implemented,
+ONE_MINUS_CONSTANT_ALPHA,constant,webgl1,implemented,
+ONE_MINUS_CONSTANT_COLOR,constant,webgl1,implemented,
+ONE_MINUS_DST_ALPHA,constant,webgl1,implemented,
+ONE_MINUS_DST_COLOR,constant,webgl1,implemented,
+ONE_MINUS_SRC_ALPHA,constant,webgl1,implemented,
+ONE_MINUS_SRC_COLOR,constant,webgl1,implemented,
+POLYGON_OFFSET_FILL,constant,webgl1,implemented,
 QUERY_RESULT,constant,webgl2,missing,
 QUERY_RESULT_AVAILABLE,constant,webgl2,missing,
 R16F,constant,webgl2,missing,
@@ -246,7 +247,7 @@ RGB16UI,constant,webgl2,missing,
 RGB32I,constant,webgl2,missing,
 RGB32UI,constant,webgl2,missing,
 RGB9_E5,constant,webgl1,missing,
-RGBA,constant,webgl1,missing,
+RGBA,constant,webgl1,implemented,
 RGBA4,constant,webgl1,missing,
 RGBA8,constant,webgl2,missing,
 RGBA8I,constant,webgl2,missing,
@@ -262,14 +263,14 @@ SAMPLER_2D_ARRAY_SHADOW,constant,webgl2,missing,
 SAMPLER_2D_ARRAY,constant,webgl2,missing,
 SAMPLER_2D_SHADOW,constant,webgl1,missing,
 SAMPLER_CUBE_SHADOW,constant,webgl1,missing,
-SAMPLE_ALPHA_TO_COVERAGE,constant,webgl1,missing,
-SAMPLES,constant,webgl1,missing,
-SCISSOR_BOX,constant,webgl1,missing,
-SCISSOR_TEST,constant,webgl1,missing,
+SAMPLE_ALPHA_TO_COVERAGE,constant,webgl1,implemented,
+SAMPLES,constant,webgl1,implemented,
+SCISSOR_BOX,constant,webgl1,implemented,
+SCISSOR_TEST,constant,webgl1,implemented,
 SHORT,constant,webgl1,missing,
 SRGB8_ALPHA8,constant,webgl1,missing,
-STENCIL_BUFFER_BIT,constant,webgl1,missing,
-STENCIL_TEST,constant,webgl1,missing,
+STENCIL_BUFFER_BIT,constant,webgl1,implemented,
+STENCIL_TEST,constant,webgl1,implemented,
 SYNC_FLUSH_COMMANDS_BIT,constant,webgl2,missing,
 SYNC_GPU_COMMANDS_COMPLETE,constant,webgl2,missing,
 TEXTURE0,constant,webgl1,missing,
@@ -292,14 +293,14 @@ TEXTURE_WRAP_S,constant,webgl1,missing,
 TEXTURE_WRAP_T,constant,webgl1,missing,
 TIMEOUT_EXPIRED,constant,webgl2,missing,
 UNIFORM_BUFFER,constant,webgl2,missing,
-UNPACK_ALIGNMENT,constant,webgl1,missing,
-UNPACK_COLORSPACE_CONVERSION_WEBGL,constant,webgl1,missing,
-UNPACK_FLIP_Y_WEBGL,constant,webgl1,missing,
-UNPACK_PREMULTIPLY_ALPHA_WEBGL,constant,webgl1,missing,
-UNPACK_ROW_LENGTH,constant,webgl1,missing,
-UNPACK_SKIP_PIXELS,constant,webgl1,missing,
-UNPACK_SKIP_ROWS,constant,webgl1,missing,
-UNSIGNED_BYTE,constant,webgl1,missing,
+UNPACK_ALIGNMENT,constant,webgl1,implemented,
+UNPACK_COLORSPACE_CONVERSION_WEBGL,constant,webgl1,implemented,
+UNPACK_FLIP_Y_WEBGL,constant,webgl1,implemented,
+UNPACK_PREMULTIPLY_ALPHA_WEBGL,constant,webgl1,implemented,
+UNPACK_ROW_LENGTH,constant,webgl1,implemented,
+UNPACK_SKIP_PIXELS,constant,webgl1,implemented,
+UNPACK_SKIP_ROWS,constant,webgl1,implemented,
+UNSIGNED_BYTE,constant,webgl1,implemented,
 UNSIGNED_INT,constant,webgl1,implemented,
 UNSIGNED_INT_10F_11F_11F_REV,constant,webgl1,missing,
 UNSIGNED_INT_24_8,constant,webgl2,missing,
@@ -308,8 +309,8 @@ UNSIGNED_SHORT,constant,webgl1,implemented,
 UNSIGNED_SHORT_4_4_4_4,constant,webgl1,missing,
 UNSIGNED_SHORT_5_5_5_1,constant,webgl1,missing,
 VALIDATE_STATUS,constant,webgl1,missing,
-VERSION,constant,webgl1,partial,"JS shim default"
+VERSION,constant,webgl1,implemented,
 VERTEX_SHADER,constant,webgl1,implemented,
-VIEWPORT,constant,webgl1,missing,
+VIEWPORT,constant,webgl1,implemented,
 WAIT_FAILED,constant,webgl2,missing,
-ZERO,constant,webgl1,missing,
+ZERO,constant,webgl1,implemented,

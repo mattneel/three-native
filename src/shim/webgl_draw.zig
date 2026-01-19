@@ -10,6 +10,47 @@ const webgl = @import("webgl.zig");
 const webgl_state = @import("webgl_state.zig");
 const webgl_program = @import("webgl_program.zig");
 
+const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
+const GL_DEPTH_BUFFER_BIT: u32 = 0x00000100;
+const GL_STENCIL_BUFFER_BIT: u32 = 0x00000400;
+const GL_NEVER: u32 = 0x0200;
+const GL_LESS: u32 = 0x0201;
+const GL_EQUAL: u32 = 0x0202;
+const GL_LEQUAL: u32 = 0x0203;
+const GL_GREATER: u32 = 0x0204;
+const GL_NOTEQUAL: u32 = 0x0205;
+const GL_GEQUAL: u32 = 0x0206;
+const GL_ALWAYS: u32 = 0x0207;
+const GL_KEEP: u32 = 0x1E00;
+const GL_REPLACE: u32 = 0x1E01;
+const GL_INCR: u32 = 0x1E02;
+const GL_DECR: u32 = 0x1E03;
+const GL_INVERT: u32 = 0x150A;
+const GL_INCR_WRAP: u32 = 0x8507;
+const GL_DECR_WRAP: u32 = 0x8508;
+const GL_FRONT: u32 = 0x0404;
+const GL_BACK: u32 = 0x0405;
+const GL_FRONT_AND_BACK: u32 = 0x0408;
+const GL_CW: u32 = 0x0900;
+const GL_CCW: u32 = 0x0901;
+const GL_ZERO: u32 = 0;
+const GL_ONE: u32 = 1;
+const GL_SRC_COLOR: u32 = 0x0300;
+const GL_ONE_MINUS_SRC_COLOR: u32 = 0x0301;
+const GL_SRC_ALPHA: u32 = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
+const GL_DST_ALPHA: u32 = 0x0304;
+const GL_ONE_MINUS_DST_ALPHA: u32 = 0x0305;
+const GL_DST_COLOR: u32 = 0x0306;
+const GL_ONE_MINUS_DST_COLOR: u32 = 0x0307;
+const GL_CONSTANT_COLOR: u32 = 0x8001;
+const GL_ONE_MINUS_CONSTANT_COLOR: u32 = 0x8002;
+const GL_CONSTANT_ALPHA: u32 = 0x8003;
+const GL_ONE_MINUS_CONSTANT_ALPHA: u32 = 0x8004;
+const GL_FUNC_ADD: u32 = 0x8006;
+const GL_FUNC_SUBTRACT: u32 = 0x800A;
+const GL_FUNC_REVERSE_SUBTRACT: u32 = 0x800B;
+
 pub const MaxVertexAttribs: usize = 16;
 pub const MaxDrawCommands: usize = 64;
 const MaxVertexBuffers: usize = sg.Bindings.vertex_buffers.len;
@@ -46,6 +87,41 @@ const DrawCommand = struct {
     program: webgl_program.ProgramId,
     attribs: [MaxVertexAttribs]VertexAttrib,
     element_buffer: ?webgl.BufferId,
+    viewport: [4]i32,
+    scissor: [4]i32,
+    scissor_enabled: bool,
+    depth_enabled: bool,
+    depth_func: u32,
+    depth_mask: bool,
+    polygon_offset: [2]f32,
+    polygon_offset_enabled: bool,
+    cull_enabled: bool,
+    cull_face: u32,
+    front_face: u32,
+    blend_enabled: bool,
+    blend_src: u32,
+    blend_dst: u32,
+    blend_src_alpha: u32,
+    blend_dst_alpha: u32,
+    blend_eq: u32,
+    blend_eq_alpha: u32,
+    color_mask: [4]bool,
+    alpha_to_coverage_enabled: bool,
+    stencil_enabled: bool,
+    stencil_func_front: u32,
+    stencil_func_back: u32,
+    stencil_ref_front: u8,
+    stencil_ref_back: u8,
+    stencil_read_mask_front: u8,
+    stencil_read_mask_back: u8,
+    stencil_write_mask_front: u8,
+    stencil_write_mask_back: u8,
+    stencil_fail_front: u32,
+    stencil_zfail_front: u32,
+    stencil_zpass_front: u32,
+    stencil_fail_back: u32,
+    stencil_zfail_back: u32,
+    stencil_zpass_back: u32,
 };
 
 const DrawState = struct {
@@ -55,6 +131,46 @@ const DrawState = struct {
     command_count: usize = 0,
     pipeline_cache: [MaxPipelineCacheEntries]PipelineCacheEntry = [_]PipelineCacheEntry{.{}} ** MaxPipelineCacheEntries,
     pipeline_cache_next: usize = 0,
+    viewport: [4]i32 = .{ 0, 0, 0, 0 },
+    scissor: [4]i32 = .{ 0, 0, 0, 0 },
+    scissor_enabled: bool = false,
+    depth_enabled: bool = false,
+    depth_func: u32 = GL_LESS,
+    depth_mask: bool = true,
+    polygon_offset: [2]f32 = .{ 0.0, 0.0 },
+    polygon_offset_enabled: bool = false,
+    cull_enabled: bool = false,
+    cull_face: u32 = GL_BACK,
+    front_face: u32 = GL_CCW,
+    blend_enabled: bool = false,
+    blend_src: u32 = GL_ONE,
+    blend_dst: u32 = GL_ZERO,
+    blend_src_alpha: u32 = GL_ONE,
+    blend_dst_alpha: u32 = GL_ZERO,
+    blend_eq: u32 = GL_FUNC_ADD,
+    blend_eq_alpha: u32 = GL_FUNC_ADD,
+    color_mask: [4]bool = .{ true, true, true, true },
+    alpha_to_coverage_enabled: bool = false,
+    stencil_enabled: bool = false,
+    stencil_func_front: u32 = GL_ALWAYS,
+    stencil_func_back: u32 = GL_ALWAYS,
+    stencil_ref_front: u8 = 0,
+    stencil_ref_back: u8 = 0,
+    stencil_read_mask_front: u8 = 0xFF,
+    stencil_read_mask_back: u8 = 0xFF,
+    stencil_write_mask_front: u8 = 0xFF,
+    stencil_write_mask_back: u8 = 0xFF,
+    stencil_fail_front: u32 = GL_KEEP,
+    stencil_zfail_front: u32 = GL_KEEP,
+    stencil_zpass_front: u32 = GL_KEEP,
+    stencil_fail_back: u32 = GL_KEEP,
+    stencil_zfail_back: u32 = GL_KEEP,
+    stencil_zpass_back: u32 = GL_KEEP,
+    clear_color: sg.Color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 },
+    clear_depth: f32 = 1.0,
+    clear_stencil: u8 = 0,
+    clear_pending: bool = false,
+    clear_mask: u32 = 0,
 };
 
 var g_state: DrawState = .{};
@@ -62,6 +178,212 @@ var g_state: DrawState = .{};
 pub fn reset() void {
     clearPipelineCache();
     g_state = .{};
+}
+
+pub fn setViewport(x: i32, y: i32, width: i32, height: i32) void {
+    g_state.viewport = .{ x, y, width, height };
+}
+
+pub fn setScissor(x: i32, y: i32, width: i32, height: i32) void {
+    g_state.scissor = .{ x, y, width, height };
+}
+
+pub fn setScissorEnabled(enabled: bool) void {
+    g_state.scissor_enabled = enabled;
+}
+
+pub fn setClearColor(r: f32, g: f32, b: f32, a: f32) void {
+    g_state.clear_color = .{ .r = r, .g = g, .b = b, .a = a };
+}
+
+pub fn setClearDepth(depth: f32) void {
+    g_state.clear_depth = depth;
+}
+
+pub fn setClearStencil(stencil: i32) void {
+    var value = stencil;
+    if (value < 0) value = 0;
+    if (value > 255) value = 255;
+    g_state.clear_stencil = @intCast(value);
+}
+
+pub fn requestClear(mask: u32) void {
+    if (mask == 0) return;
+    g_state.clear_pending = true;
+    g_state.clear_mask = mask;
+}
+
+pub fn setDepthTestEnabled(enabled: bool) void {
+    g_state.depth_enabled = enabled;
+}
+
+pub fn setDepthFunc(func: u32) void {
+    g_state.depth_func = func;
+}
+
+pub fn setDepthMask(enabled: bool) void {
+    g_state.depth_mask = enabled;
+}
+
+pub fn setPolygonOffset(factor: f32, units: f32) void {
+    g_state.polygon_offset = .{ factor, units };
+}
+
+pub fn setPolygonOffsetEnabled(enabled: bool) void {
+    g_state.polygon_offset_enabled = enabled;
+}
+
+pub fn setCullEnabled(enabled: bool) void {
+    g_state.cull_enabled = enabled;
+}
+
+pub fn setCullFace(face: u32) void {
+    g_state.cull_face = face;
+}
+
+pub fn setFrontFace(face: u32) void {
+    g_state.front_face = face;
+}
+
+pub fn setBlendEnabled(enabled: bool) void {
+    g_state.blend_enabled = enabled;
+}
+
+pub fn setBlendFunc(src: u32, dst: u32) void {
+    g_state.blend_src = src;
+    g_state.blend_dst = dst;
+    g_state.blend_src_alpha = src;
+    g_state.blend_dst_alpha = dst;
+}
+
+pub fn setBlendFuncSeparate(src: u32, dst: u32, src_alpha: u32, dst_alpha: u32) void {
+    g_state.blend_src = src;
+    g_state.blend_dst = dst;
+    g_state.blend_src_alpha = src_alpha;
+    g_state.blend_dst_alpha = dst_alpha;
+}
+
+pub fn setBlendEquation(eq: u32) void {
+    g_state.blend_eq = eq;
+    g_state.blend_eq_alpha = eq;
+}
+
+pub fn setBlendEquationSeparate(eq: u32, eq_alpha: u32) void {
+    g_state.blend_eq = eq;
+    g_state.blend_eq_alpha = eq_alpha;
+}
+
+pub fn setColorMask(r: bool, g: bool, b: bool, a: bool) void {
+    g_state.color_mask = .{ r, g, b, a };
+}
+
+pub fn setAlphaToCoverageEnabled(enabled: bool) void {
+    g_state.alpha_to_coverage_enabled = enabled;
+}
+
+pub fn setStencilEnabled(enabled: bool) void {
+    g_state.stencil_enabled = enabled;
+}
+
+pub fn setStencilFunc(func: u32, ref: i32, mask: u32) void {
+    setStencilFuncSeparate(GL_FRONT_AND_BACK, func, ref, mask);
+}
+
+pub fn setStencilFuncSeparate(face: u32, func: u32, ref: i32, mask: u32) void {
+    const ref_u8 = clampStencilU8(ref);
+    const mask_u8: u8 = if (mask > 255) 255 else @as(u8, @intCast(mask));
+    switch (face) {
+        GL_FRONT => {
+            g_state.stencil_func_front = func;
+            g_state.stencil_ref_front = ref_u8;
+            g_state.stencil_read_mask_front = mask_u8;
+        },
+        GL_BACK => {
+            g_state.stencil_func_back = func;
+            g_state.stencil_ref_back = ref_u8;
+            g_state.stencil_read_mask_back = mask_u8;
+        },
+        GL_FRONT_AND_BACK => {
+            g_state.stencil_func_front = func;
+            g_state.stencil_func_back = func;
+            g_state.stencil_ref_front = ref_u8;
+            g_state.stencil_ref_back = ref_u8;
+            g_state.stencil_read_mask_front = mask_u8;
+            g_state.stencil_read_mask_back = mask_u8;
+        },
+        else => {},
+    }
+}
+
+pub fn setStencilMask(mask: u32) void {
+    setStencilMaskSeparate(GL_FRONT_AND_BACK, mask);
+}
+
+pub fn setStencilMaskSeparate(face: u32, mask: u32) void {
+    const mask_u8: u8 = if (mask > 255) 255 else @as(u8, @intCast(mask));
+    switch (face) {
+        GL_FRONT => g_state.stencil_write_mask_front = mask_u8,
+        GL_BACK => g_state.stencil_write_mask_back = mask_u8,
+        GL_FRONT_AND_BACK => {
+            g_state.stencil_write_mask_front = mask_u8;
+            g_state.stencil_write_mask_back = mask_u8;
+        },
+        else => {},
+    }
+}
+
+pub fn setStencilOp(fail: u32, zfail: u32, zpass: u32) void {
+    setStencilOpSeparate(GL_FRONT_AND_BACK, fail, zfail, zpass);
+}
+
+pub fn setStencilOpSeparate(face: u32, fail: u32, zfail: u32, zpass: u32) void {
+    switch (face) {
+        GL_FRONT => {
+            g_state.stencil_fail_front = fail;
+            g_state.stencil_zfail_front = zfail;
+            g_state.stencil_zpass_front = zpass;
+        },
+        GL_BACK => {
+            g_state.stencil_fail_back = fail;
+            g_state.stencil_zfail_back = zfail;
+            g_state.stencil_zpass_back = zpass;
+        },
+        GL_FRONT_AND_BACK => {
+            g_state.stencil_fail_front = fail;
+            g_state.stencil_zfail_front = zfail;
+            g_state.stencil_zpass_front = zpass;
+            g_state.stencil_fail_back = fail;
+            g_state.stencil_zfail_back = zfail;
+            g_state.stencil_zpass_back = zpass;
+        },
+        else => {},
+    }
+}
+
+pub fn consumePassAction(default_action: sg.PassAction) sg.PassAction {
+    if (!g_state.clear_pending) return default_action;
+    var action = sg.PassAction{};
+    if ((g_state.clear_mask & GL_COLOR_BUFFER_BIT) != 0) {
+        action.colors[0].load_action = .CLEAR;
+        action.colors[0].clear_value = g_state.clear_color;
+    } else {
+        action.colors[0].load_action = .LOAD;
+    }
+    if ((g_state.clear_mask & GL_DEPTH_BUFFER_BIT) != 0) {
+        action.depth.load_action = .CLEAR;
+        action.depth.clear_value = g_state.clear_depth;
+    } else {
+        action.depth.load_action = .LOAD;
+    }
+    if ((g_state.clear_mask & GL_STENCIL_BUFFER_BIT) != 0) {
+        action.stencil.load_action = .CLEAR;
+        action.stencil.clear_value = g_state.clear_stencil;
+    } else {
+        action.stencil.load_action = .LOAD;
+    }
+    g_state.clear_pending = false;
+    g_state.clear_mask = 0;
+    return action;
 }
 
 pub fn useProgram(id: webgl_program.ProgramId) !void {
@@ -129,6 +451,41 @@ pub fn drawArrays(mode: u32, first: i32, count: i32) !void {
         .program = program,
         .attribs = g_state.attribs,
         .element_buffer = null,
+        .viewport = g_state.viewport,
+        .scissor = g_state.scissor,
+        .scissor_enabled = g_state.scissor_enabled,
+        .depth_enabled = g_state.depth_enabled,
+        .depth_func = g_state.depth_func,
+        .depth_mask = g_state.depth_mask,
+        .polygon_offset = g_state.polygon_offset,
+        .polygon_offset_enabled = g_state.polygon_offset_enabled,
+        .cull_enabled = g_state.cull_enabled,
+        .cull_face = g_state.cull_face,
+        .front_face = g_state.front_face,
+        .blend_enabled = g_state.blend_enabled,
+        .blend_src = g_state.blend_src,
+        .blend_dst = g_state.blend_dst,
+        .blend_src_alpha = g_state.blend_src_alpha,
+        .blend_dst_alpha = g_state.blend_dst_alpha,
+        .blend_eq = g_state.blend_eq,
+        .blend_eq_alpha = g_state.blend_eq_alpha,
+        .color_mask = g_state.color_mask,
+        .alpha_to_coverage_enabled = g_state.alpha_to_coverage_enabled,
+        .stencil_enabled = g_state.stencil_enabled,
+        .stencil_func_front = g_state.stencil_func_front,
+        .stencil_func_back = g_state.stencil_func_back,
+        .stencil_ref_front = g_state.stencil_ref_front,
+        .stencil_ref_back = g_state.stencil_ref_back,
+        .stencil_read_mask_front = g_state.stencil_read_mask_front,
+        .stencil_read_mask_back = g_state.stencil_read_mask_back,
+        .stencil_write_mask_front = g_state.stencil_write_mask_front,
+        .stencil_write_mask_back = g_state.stencil_write_mask_back,
+        .stencil_fail_front = g_state.stencil_fail_front,
+        .stencil_zfail_front = g_state.stencil_zfail_front,
+        .stencil_zpass_front = g_state.stencil_zpass_front,
+        .stencil_fail_back = g_state.stencil_fail_back,
+        .stencil_zfail_back = g_state.stencil_zfail_back,
+        .stencil_zpass_back = g_state.stencil_zpass_back,
     };
     g_state.command_count += 1;
 }
@@ -147,6 +504,41 @@ pub fn drawElements(mode: u32, count: i32, index_type: u32, offset: u32, element
         .program = program,
         .attribs = g_state.attribs,
         .element_buffer = element_buffer,
+        .viewport = g_state.viewport,
+        .scissor = g_state.scissor,
+        .scissor_enabled = g_state.scissor_enabled,
+        .depth_enabled = g_state.depth_enabled,
+        .depth_func = g_state.depth_func,
+        .depth_mask = g_state.depth_mask,
+        .polygon_offset = g_state.polygon_offset,
+        .polygon_offset_enabled = g_state.polygon_offset_enabled,
+        .cull_enabled = g_state.cull_enabled,
+        .cull_face = g_state.cull_face,
+        .front_face = g_state.front_face,
+        .blend_enabled = g_state.blend_enabled,
+        .blend_src = g_state.blend_src,
+        .blend_dst = g_state.blend_dst,
+        .blend_src_alpha = g_state.blend_src_alpha,
+        .blend_dst_alpha = g_state.blend_dst_alpha,
+        .blend_eq = g_state.blend_eq,
+        .blend_eq_alpha = g_state.blend_eq_alpha,
+        .color_mask = g_state.color_mask,
+        .alpha_to_coverage_enabled = g_state.alpha_to_coverage_enabled,
+        .stencil_enabled = g_state.stencil_enabled,
+        .stencil_func_front = g_state.stencil_func_front,
+        .stencil_func_back = g_state.stencil_func_back,
+        .stencil_ref_front = g_state.stencil_ref_front,
+        .stencil_ref_back = g_state.stencil_ref_back,
+        .stencil_read_mask_front = g_state.stencil_read_mask_front,
+        .stencil_read_mask_back = g_state.stencil_read_mask_back,
+        .stencil_write_mask_front = g_state.stencil_write_mask_front,
+        .stencil_write_mask_back = g_state.stencil_write_mask_back,
+        .stencil_fail_front = g_state.stencil_fail_front,
+        .stencil_zfail_front = g_state.stencil_zfail_front,
+        .stencil_zpass_front = g_state.stencil_zpass_front,
+        .stencil_fail_back = g_state.stencil_fail_back,
+        .stencil_zfail_back = g_state.stencil_zfail_back,
+        .stencil_zpass_back = g_state.stencil_zpass_back,
     };
     g_state.command_count += 1;
 }
@@ -228,12 +620,47 @@ pub fn flush() void {
             continue;
         };
 
+        const vp = sanitizeRect(cmd.viewport);
+        sg.applyViewport(vp[0], vp[1], vp[2], vp[3], false);
+        const scissor = if (cmd.scissor_enabled) sanitizeRect(cmd.scissor) else vp;
+        sg.applyScissorRect(scissor[0], scissor[1], scissor[2], scissor[3], false);
+
         var pip_desc = sg.PipelineDesc{};
         pip_desc.shader = prog.backend_shader;
         pip_desc.primitive_type = mapPrimitive(cmd.mode) orelse continue;
         if (cmd.kind == .elements) {
             pip_desc.index_type = mapIndexType(cmd.index_type) orelse continue;
         }
+        pip_desc.cull_mode = mapCullMode(cmd.cull_enabled, cmd.cull_face);
+        pip_desc.face_winding = mapFaceWinding(cmd.front_face);
+        pip_desc.depth.compare = if (cmd.depth_enabled) mapCompare(cmd.depth_func) else .ALWAYS;
+        pip_desc.depth.write_enabled = cmd.depth_mask;
+        if (cmd.polygon_offset_enabled) {
+            pip_desc.depth.bias = cmd.polygon_offset[1];
+            pip_desc.depth.bias_slope_scale = cmd.polygon_offset[0];
+        }
+        pip_desc.stencil.enabled = cmd.stencil_enabled;
+        pip_desc.stencil.read_mask = cmd.stencil_read_mask_front;
+        pip_desc.stencil.write_mask = cmd.stencil_write_mask_front;
+        pip_desc.stencil.ref = cmd.stencil_ref_front;
+        pip_desc.stencil.front.compare = mapCompare(cmd.stencil_func_front);
+        pip_desc.stencil.front.fail_op = mapStencilOp(cmd.stencil_fail_front);
+        pip_desc.stencil.front.depth_fail_op = mapStencilOp(cmd.stencil_zfail_front);
+        pip_desc.stencil.front.pass_op = mapStencilOp(cmd.stencil_zpass_front);
+        pip_desc.stencil.back.compare = mapCompare(cmd.stencil_func_back);
+        pip_desc.stencil.back.fail_op = mapStencilOp(cmd.stencil_fail_back);
+        pip_desc.stencil.back.depth_fail_op = mapStencilOp(cmd.stencil_zfail_back);
+        pip_desc.stencil.back.pass_op = mapStencilOp(cmd.stencil_zpass_back);
+        pip_desc.color_count = 1;
+        pip_desc.colors[0].write_mask = mapColorMask(cmd.color_mask);
+        pip_desc.colors[0].blend.enabled = cmd.blend_enabled;
+        pip_desc.colors[0].blend.src_factor_rgb = mapBlendFactor(cmd.blend_src);
+        pip_desc.colors[0].blend.dst_factor_rgb = mapBlendFactor(cmd.blend_dst);
+        pip_desc.colors[0].blend.op_rgb = mapBlendOp(cmd.blend_eq);
+        pip_desc.colors[0].blend.src_factor_alpha = mapBlendFactor(cmd.blend_src_alpha);
+        pip_desc.colors[0].blend.dst_factor_alpha = mapBlendFactor(cmd.blend_dst_alpha);
+        pip_desc.colors[0].blend.op_alpha = mapBlendOp(cmd.blend_eq_alpha);
+        pip_desc.alpha_to_coverage_enabled = cmd.alpha_to_coverage_enabled;
 
         var bindings = sg.Bindings{};
         var slot_buffers: [MaxVertexBuffers]?webgl.BufferId = [_]?webgl.BufferId{null} ** MaxVertexBuffers;
@@ -357,10 +784,37 @@ fn getCachedPipeline(key: u64, desc: sg.PipelineDesc) ?sg.Pipeline {
 fn pipelineKey(shader_id: u32, desc: *const sg.PipelineDesc) u64 {
     var hash: u64 = 1469598103934665603;
     hash = hashU64(hash, shader_id);
-    hash = hashU64(hash, @intFromEnum(desc.primitive_type));
-    hash = hashU64(hash, @intFromEnum(desc.index_type));
+    hash = hashEnum(hash, desc.primitive_type);
+    hash = hashEnum(hash, desc.index_type);
+    hash = hashEnum(hash, desc.cull_mode);
+    hash = hashEnum(hash, desc.face_winding);
+    hash = hashEnum(hash, desc.depth.compare);
+    hash = hashBool(hash, desc.depth.write_enabled);
+    hash = hashF32(hash, desc.depth.bias);
+    hash = hashF32(hash, desc.depth.bias_slope_scale);
+    hash = hashBool(hash, desc.stencil.enabled);
+    hash = hashU64(hash, @intCast(desc.stencil.read_mask));
+    hash = hashU64(hash, @intCast(desc.stencil.write_mask));
+    hash = hashU64(hash, @intCast(desc.stencil.ref));
+    hash = hashEnum(hash, desc.stencil.front.compare);
+    hash = hashEnum(hash, desc.stencil.front.fail_op);
+    hash = hashEnum(hash, desc.stencil.front.depth_fail_op);
+    hash = hashEnum(hash, desc.stencil.front.pass_op);
+    hash = hashEnum(hash, desc.stencil.back.compare);
+    hash = hashEnum(hash, desc.stencil.back.fail_op);
+    hash = hashEnum(hash, desc.stencil.back.depth_fail_op);
+    hash = hashEnum(hash, desc.stencil.back.pass_op);
+    hash = hashEnum(hash, desc.colors[0].write_mask);
+    hash = hashBool(hash, desc.colors[0].blend.enabled);
+    hash = hashEnum(hash, desc.colors[0].blend.src_factor_rgb);
+    hash = hashEnum(hash, desc.colors[0].blend.dst_factor_rgb);
+    hash = hashEnum(hash, desc.colors[0].blend.op_rgb);
+    hash = hashEnum(hash, desc.colors[0].blend.src_factor_alpha);
+    hash = hashEnum(hash, desc.colors[0].blend.dst_factor_alpha);
+    hash = hashEnum(hash, desc.colors[0].blend.op_alpha);
+    hash = hashBool(hash, desc.alpha_to_coverage_enabled);
     for (desc.layout.attrs) |attr| {
-        hash = hashU64(hash, @intFromEnum(attr.format));
+        hash = hashEnum(hash, attr.format);
         hash = hashU64(hash, @intCast(attr.offset));
         hash = hashU64(hash, @intCast(attr.buffer_index));
     }
@@ -371,7 +825,33 @@ fn pipelineKey(shader_id: u32, desc: *const sg.PipelineDesc) u64 {
 }
 
 fn hashU64(hash: u64, value: u64) u64 {
-    return (hash ^ value) * 1099511628211;
+    return (hash ^ value) *% 1099511628211;
+}
+
+fn hashEnum(hash: u64, value: anytype) u64 {
+    return hashU64(hash, @as(u64, @intCast(@intFromEnum(value))));
+}
+
+fn hashBool(hash: u64, value: bool) u64 {
+    return hashU64(hash, if (value) 1 else 0);
+}
+
+fn hashF32(hash: u64, value: f32) u64 {
+    const bits: u32 = @bitCast(value);
+    return hashU64(hash, bits);
+}
+
+fn sanitizeRect(rect: [4]i32) [4]i32 {
+    var out = rect;
+    if (out[2] < 0) out[2] = 0;
+    if (out[3] < 0) out[3] = 0;
+    return out;
+}
+
+fn clampStencilU8(value: i32) u8 {
+    if (value < 0) return 0;
+    if (value > 255) return 255;
+    return @intCast(value);
 }
 
 fn attrIndex(index: u32) !usize {
@@ -455,6 +935,91 @@ fn mapPrimitive(gl_mode: u32) ?sg.PrimitiveType {
     };
 }
 
+fn mapCompare(gl_func: u32) sg.CompareFunc {
+    return switch (gl_func) {
+        GL_NEVER => .NEVER,
+        GL_LESS => .LESS,
+        GL_EQUAL => .EQUAL,
+        GL_LEQUAL => .LESS_EQUAL,
+        GL_GREATER => .GREATER,
+        GL_NOTEQUAL => .NOT_EQUAL,
+        GL_GEQUAL => .GREATER_EQUAL,
+        GL_ALWAYS => .ALWAYS,
+        else => .ALWAYS,
+    };
+}
+
+fn mapCullMode(enabled: bool, face: u32) sg.CullMode {
+    if (!enabled) return .NONE;
+    return switch (face) {
+        GL_FRONT => .FRONT,
+        GL_BACK => .BACK,
+        GL_FRONT_AND_BACK => .FRONT,
+        else => .BACK,
+    };
+}
+
+fn mapFaceWinding(front_face: u32) sg.FaceWinding {
+    return switch (front_face) {
+        GL_CCW => .CCW,
+        GL_CW => .CW,
+        else => .CCW,
+    };
+}
+
+fn mapBlendFactor(gl_factor: u32) sg.BlendFactor {
+    return switch (gl_factor) {
+        GL_ZERO => .ZERO,
+        GL_ONE => .ONE,
+        GL_SRC_COLOR => .SRC_COLOR,
+        GL_ONE_MINUS_SRC_COLOR => .ONE_MINUS_SRC_COLOR,
+        GL_SRC_ALPHA => .SRC_ALPHA,
+        GL_ONE_MINUS_SRC_ALPHA => .ONE_MINUS_SRC_ALPHA,
+        GL_DST_COLOR => .DST_COLOR,
+        GL_ONE_MINUS_DST_COLOR => .ONE_MINUS_DST_COLOR,
+        GL_DST_ALPHA => .DST_ALPHA,
+        GL_ONE_MINUS_DST_ALPHA => .ONE_MINUS_DST_ALPHA,
+        GL_CONSTANT_COLOR => .BLEND_COLOR,
+        GL_ONE_MINUS_CONSTANT_COLOR => .ONE_MINUS_BLEND_COLOR,
+        GL_CONSTANT_ALPHA => .BLEND_ALPHA,
+        GL_ONE_MINUS_CONSTANT_ALPHA => .ONE_MINUS_BLEND_ALPHA,
+        else => .ONE,
+    };
+}
+
+fn mapBlendOp(gl_op: u32) sg.BlendOp {
+    return switch (gl_op) {
+        GL_FUNC_ADD => .ADD,
+        GL_FUNC_SUBTRACT => .SUBTRACT,
+        GL_FUNC_REVERSE_SUBTRACT => .REVERSE_SUBTRACT,
+        else => .ADD,
+    };
+}
+
+fn mapStencilOp(gl_op: u32) sg.StencilOp {
+    return switch (gl_op) {
+        GL_KEEP => .KEEP,
+        GL_ZERO => .ZERO,
+        GL_REPLACE => .REPLACE,
+        GL_INCR => .INCR_CLAMP,
+        GL_DECR => .DECR_CLAMP,
+        GL_INVERT => .INVERT,
+        GL_INCR_WRAP => .INCR_WRAP,
+        GL_DECR_WRAP => .DECR_WRAP,
+        else => .KEEP,
+    };
+}
+
+fn mapColorMask(mask: [4]bool) sg.ColorMask {
+    var bits: u8 = 0;
+    if (mask[0]) bits |= 1;
+    if (mask[1]) bits |= 2;
+    if (mask[2]) bits |= 4;
+    if (mask[3]) bits |= 8;
+    if (bits == 0) return .NONE;
+    return @enumFromInt(@as(i32, bits));
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -470,4 +1035,117 @@ test "Draw state queues commands" {
     try enableVertexAttribArray(0);
     try drawArrays(0x0004, 0, 3);
     try testing.expectEqual(@as(usize, 1), g_state.command_count);
+}
+
+test "Draw state captures depth cull blend" {
+    reset();
+    const programs = webgl_program.globalProgramTable();
+    programs.reset();
+    defer programs.reset();
+
+    setDepthTestEnabled(true);
+    setDepthFunc(GL_GREATER);
+    setDepthMask(false);
+    setPolygonOffset(1.5, 2.0);
+    setPolygonOffsetEnabled(true);
+    setCullEnabled(true);
+    setCullFace(GL_FRONT);
+    setFrontFace(GL_CW);
+    setBlendEnabled(true);
+    setBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+    setBlendEquationSeparate(GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT);
+    setColorMask(true, false, true, false);
+    setAlphaToCoverageEnabled(true);
+
+    const pid = try programs.alloc();
+    try useProgram(pid);
+    try drawArrays(0x0004, 0, 3);
+
+    const cmd = g_state.commands[0];
+    try testing.expect(cmd.depth_enabled);
+    try testing.expectEqual(GL_GREATER, cmd.depth_func);
+    try testing.expectEqual(false, cmd.depth_mask);
+    try testing.expectEqual(@as(f32, 1.5), cmd.polygon_offset[0]);
+    try testing.expectEqual(@as(f32, 2.0), cmd.polygon_offset[1]);
+    try testing.expect(cmd.polygon_offset_enabled);
+    try testing.expect(cmd.cull_enabled);
+    try testing.expectEqual(GL_FRONT, cmd.cull_face);
+    try testing.expectEqual(GL_CW, cmd.front_face);
+    try testing.expect(cmd.blend_enabled);
+    try testing.expectEqual(GL_SRC_ALPHA, cmd.blend_src);
+    try testing.expectEqual(GL_ONE_MINUS_SRC_ALPHA, cmd.blend_dst);
+    try testing.expectEqual(GL_ONE, cmd.blend_src_alpha);
+    try testing.expectEqual(GL_ZERO, cmd.blend_dst_alpha);
+    try testing.expectEqual(GL_FUNC_SUBTRACT, cmd.blend_eq);
+    try testing.expectEqual(GL_FUNC_REVERSE_SUBTRACT, cmd.blend_eq_alpha);
+    try testing.expectEqual([4]bool{ true, false, true, false }, cmd.color_mask);
+    try testing.expect(cmd.alpha_to_coverage_enabled);
+}
+
+test "Draw state captures stencil" {
+    reset();
+    const programs = webgl_program.globalProgramTable();
+    programs.reset();
+    defer programs.reset();
+
+    setStencilEnabled(true);
+    setStencilFuncSeparate(GL_FRONT, GL_ALWAYS, 1, 0xAA);
+    setStencilFuncSeparate(GL_BACK, GL_NEVER, 2, 0x0F);
+    setStencilMaskSeparate(GL_FRONT, 0x0F);
+    setStencilMaskSeparate(GL_BACK, 0xF0);
+    setStencilOpSeparate(GL_FRONT, GL_KEEP, GL_INCR, GL_DECR);
+    setStencilOpSeparate(GL_BACK, GL_REPLACE, GL_INVERT, GL_INCR_WRAP);
+
+    const pid = try programs.alloc();
+    try useProgram(pid);
+    try drawArrays(0x0004, 0, 3);
+
+    const cmd = g_state.commands[0];
+    try testing.expect(cmd.stencil_enabled);
+    try testing.expectEqual(GL_ALWAYS, cmd.stencil_func_front);
+    try testing.expectEqual(GL_NEVER, cmd.stencil_func_back);
+    try testing.expectEqual(@as(u8, 1), cmd.stencil_ref_front);
+    try testing.expectEqual(@as(u8, 2), cmd.stencil_ref_back);
+    try testing.expectEqual(@as(u8, 0xAA), cmd.stencil_read_mask_front);
+    try testing.expectEqual(@as(u8, 0x0F), cmd.stencil_read_mask_back);
+    try testing.expectEqual(@as(u8, 0x0F), cmd.stencil_write_mask_front);
+    try testing.expectEqual(@as(u8, 0xF0), cmd.stencil_write_mask_back);
+    try testing.expectEqual(GL_KEEP, cmd.stencil_fail_front);
+    try testing.expectEqual(GL_INCR, cmd.stencil_zfail_front);
+    try testing.expectEqual(GL_DECR, cmd.stencil_zpass_front);
+    try testing.expectEqual(GL_REPLACE, cmd.stencil_fail_back);
+    try testing.expectEqual(GL_INVERT, cmd.stencil_zfail_back);
+    try testing.expectEqual(GL_INCR_WRAP, cmd.stencil_zpass_back);
+}
+
+test "Pipeline key includes depth cull blend state" {
+    var desc = sg.PipelineDesc{};
+    desc.primitive_type = .TRIANGLES;
+    const base = pipelineKey(1, &desc);
+
+    desc.depth.compare = .LESS;
+    desc.depth.write_enabled = true;
+    const depth_key = pipelineKey(1, &desc);
+    try testing.expect(depth_key != base);
+
+    desc = sg.PipelineDesc{};
+    desc.primitive_type = .TRIANGLES;
+    desc.cull_mode = .BACK;
+    const cull_key = pipelineKey(1, &desc);
+    try testing.expect(cull_key != base);
+
+    desc = sg.PipelineDesc{};
+    desc.primitive_type = .TRIANGLES;
+    desc.colors[0].blend.enabled = true;
+    desc.colors[0].blend.src_factor_rgb = .SRC_ALPHA;
+    desc.colors[0].blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
+    const blend_key = pipelineKey(1, &desc);
+    try testing.expect(blend_key != base);
+
+    desc = sg.PipelineDesc{};
+    desc.primitive_type = .TRIANGLES;
+    desc.stencil.enabled = true;
+    desc.stencil.front.compare = .LESS;
+    const stencil_key = pipelineKey(1, &desc);
+    try testing.expect(stencil_key != base);
 }

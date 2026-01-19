@@ -45,7 +45,6 @@ pub const Runtime = struct {
     raf: [MaxRaf]RafEntry,
     next_raf_id: i32,
     dom_installed: bool,
-    gl_installed: bool,
 
     const Self = @This();
 
@@ -70,7 +69,6 @@ pub const Runtime = struct {
             .raf = [_]RafEntry{.{}} ** MaxRaf,
             .next_raf_id = 1,
             .dom_installed = false,
-            .gl_installed = false,
         };
     }
 
@@ -133,13 +131,6 @@ pub const Runtime = struct {
         self.dom_installed = true;
     }
 
-    pub fn installGlStubs(self: *Self) !void {
-        if (self.gl_installed) return;
-        g_js_mutex.lock();
-        defer g_js_mutex.unlock();
-        try evalGlStubsScript(self.ctx);
-        self.gl_installed = true;
-    }
 
     pub fn getSharedState(self: *Self) *SharedState {
         return &self.shared;
@@ -199,12 +190,85 @@ var g_runtime: ?*Runtime = null;
 var g_start_time_ms: i64 = 0;
 var g_js_mutex: std.Thread.Mutex = .{};
 
+const GlState = struct {
+    viewport: [4]i32 = .{ 0, 0, 0, 0 },
+    scissor: [4]i32 = .{ 0, 0, 0, 0 },
+    clear_color: [4]f32 = .{ 0, 0, 0, 0 },
+    clear_depth: f32 = 1.0,
+    clear_stencil: i32 = 0,
+    line_width: f32 = 1.0,
+    depth_mask: bool = true,
+    color_mask: [4]bool = .{ true, true, true, true },
+    depth_func: u32 = GL_LESS,
+    cull_face: u32 = GL_BACK,
+    front_face: u32 = GL_CCW,
+    blend_src: u32 = GL_ONE,
+    blend_dst: u32 = GL_ZERO,
+    blend_src_alpha: u32 = GL_ONE,
+    blend_dst_alpha: u32 = GL_ZERO,
+    blend_eq: u32 = GL_FUNC_ADD,
+    blend_eq_alpha: u32 = GL_FUNC_ADD,
+    stencil_func_front: u32 = GL_ALWAYS,
+    stencil_func_back: u32 = GL_ALWAYS,
+    stencil_ref_front: u8 = 0,
+    stencil_ref_back: u8 = 0,
+    stencil_value_mask_front: u8 = 0xFF,
+    stencil_value_mask_back: u8 = 0xFF,
+    stencil_write_mask_front: u8 = 0xFF,
+    stencil_write_mask_back: u8 = 0xFF,
+    stencil_fail_front: u32 = GL_KEEP,
+    stencil_zfail_front: u32 = GL_KEEP,
+    stencil_zpass_front: u32 = GL_KEEP,
+    stencil_fail_back: u32 = GL_KEEP,
+    stencil_zfail_back: u32 = GL_KEEP,
+    stencil_zpass_back: u32 = GL_KEEP,
+    polygon_offset: [2]f32 = .{ 0, 0 },
+    unpack_alignment: i32 = 4,
+    unpack_row_length: i32 = 0,
+    unpack_skip_pixels: i32 = 0,
+    unpack_skip_rows: i32 = 0,
+    unpack_flip_y: bool = false,
+    unpack_premultiply_alpha: bool = false,
+    unpack_colorspace_conversion: i32 = 0,
+    enabled_depth_test: bool = false,
+    enabled_stencil_test: bool = false,
+    enabled_blend: bool = false,
+    enabled_cull_face: bool = false,
+    enabled_polygon_offset: bool = false,
+    enabled_scissor_test: bool = false,
+    enabled_sample_alpha_to_coverage: bool = false,
+};
+
+var g_gl_state: GlState = .{};
+
 fn getRuntime(ctx: *c.JSContext) ?*Runtime {
     const ctx_opaque = c.JS_GetContextOpaque(ctx);
     if (ctx_opaque != null) {
         return @ptrCast(@alignCast(ctx_opaque));
     }
     return g_runtime;
+}
+
+fn clampU8(value: i32) u8 {
+    if (value < 0) return 0;
+    if (value > 255) return 255;
+    return @intCast(value);
+}
+
+fn jsArray2(ctx: *c.JSContext, a: i32, b: i32) c.JSValue {
+    const arr = c.JS_NewArray(ctx, 2);
+    _ = c.JS_SetPropertyUint32(ctx, arr, 0, c.JS_NewInt32(ctx, a));
+    _ = c.JS_SetPropertyUint32(ctx, arr, 1, c.JS_NewInt32(ctx, b));
+    return arr;
+}
+
+fn jsArray4(ctx: *c.JSContext, a: i32, b: i32, c_val: i32, d: i32) c.JSValue {
+    const arr = c.JS_NewArray(ctx, 4);
+    _ = c.JS_SetPropertyUint32(ctx, arr, 0, c.JS_NewInt32(ctx, a));
+    _ = c.JS_SetPropertyUint32(ctx, arr, 1, c.JS_NewInt32(ctx, b));
+    _ = c.JS_SetPropertyUint32(ctx, arr, 2, c.JS_NewInt32(ctx, c_val));
+    _ = c.JS_SetPropertyUint32(ctx, arr, 3, c.JS_NewInt32(ctx, d));
+    return arr;
 }
 
 fn dumpException(ctx: *c.JSContext) void {
@@ -246,61 +310,6 @@ fn createDomStubs(ctx: *c.JSContext) !void {
     _ = c.JS_SetPropertyStr(ctx, global, "window", window_obj);
 }
 
-fn evalGlStubsScript(ctx: *c.JSContext) !void {
-    const script =
-        "if (typeof gl !== 'undefined') {\n" ++
-        "  if (gl.VERSION === undefined) gl.VERSION = 0x1F02;\n" ++
-        "  if (gl.SHADING_LANGUAGE_VERSION === undefined) gl.SHADING_LANGUAGE_VERSION = 0x8B8C;\n" ++
-        "  if (gl.VENDOR === undefined) gl.VENDOR = 0x1F00;\n" ++
-        "  if (gl.RENDERER === undefined) gl.RENDERER = 0x1F01;\n" ++
-        "  if (gl.MAX_TEXTURE_IMAGE_UNITS === undefined) gl.MAX_TEXTURE_IMAGE_UNITS = 0x8872;\n" ++
-        "  if (gl.MAX_VERTEX_ATTRIBS === undefined) gl.MAX_VERTEX_ATTRIBS = 0x8869;\n" ++
-        "  if (gl.MAX_TEXTURE_SIZE === undefined) gl.MAX_TEXTURE_SIZE = 0x0D33;\n" ++
-        "  if (gl.MAX_CUBE_MAP_TEXTURE_SIZE === undefined) gl.MAX_CUBE_MAP_TEXTURE_SIZE = 0x851C;\n" ++
-        "  if (gl.MAX_VERTEX_UNIFORM_VECTORS === undefined) gl.MAX_VERTEX_UNIFORM_VECTORS = 0x8DFB;\n" ++
-        "  if (gl.MAX_FRAGMENT_UNIFORM_VECTORS === undefined) gl.MAX_FRAGMENT_UNIFORM_VECTORS = 0x8DFD;\n" ++
-        "  if (gl.MAX_VARYING_VECTORS === undefined) gl.MAX_VARYING_VECTORS = 0x8DFC;\n" ++
-        "  if (gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS === undefined) gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS = 0x8B4C;\n" ++
-        "  if (gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS === undefined) gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8B4D;\n" ++
-        "  if (gl.ALIASED_LINE_WIDTH_RANGE === undefined) gl.ALIASED_LINE_WIDTH_RANGE = 0x846E;\n" ++
-        "  if (gl.ALIASED_POINT_SIZE_RANGE === undefined) gl.ALIASED_POINT_SIZE_RANGE = 0x846D;\n" ++
-        "  if (gl.MAX_VIEWPORT_DIMS === undefined) gl.MAX_VIEWPORT_DIMS = 0x0D3A;\n" ++
-        "  if (!gl.getSupportedExtensions) gl.getSupportedExtensions = function(){ return []; };\n" ++
-        "  if (!gl.getExtension) gl.getExtension = function(){ return null; };\n" ++
-        "  if (!gl.getContextAttributes) gl.getContextAttributes = function(){\n" ++
-        "    return { alpha: true, depth: true, stencil: false, antialias: false, premultipliedAlpha: true, preserveDrawingBuffer: false };\n" ++
-        "  };\n" ++
-        "  if (!gl.viewport) gl.viewport = function(x,y,w,h){ gl.drawingBufferWidth = w; gl.drawingBufferHeight = h; };\n" ++
-        "  if (!gl.clearColor) gl.clearColor = function(r,g,b,a){ setClearColor(r,g,b); };\n" ++
-        "  if (!gl.clear) gl.clear = function(mask) { };\n" ++
-        "  if (!gl.getParameter) gl.getParameter = function(p){\n" ++
-        "    if (p === gl.VERSION) return 'WebGL 1.0 (three-native)';\n" ++
-        "    if (p === gl.SHADING_LANGUAGE_VERSION) return 'WebGL GLSL ES 1.0';\n" ++
-        "    if (p === gl.VENDOR) return 'three-native';\n" ++
-        "    if (p === gl.RENDERER) return 'sokol';\n" ++
-        "    if (p === gl.MAX_TEXTURE_IMAGE_UNITS) return 8;\n" ++
-        "    if (p === gl.MAX_VERTEX_ATTRIBS) return 16;\n" ++
-        "    if (p === gl.MAX_TEXTURE_SIZE) return 4096;\n" ++
-        "    if (p === gl.MAX_CUBE_MAP_TEXTURE_SIZE) return 4096;\n" ++
-        "    if (p === gl.MAX_VERTEX_UNIFORM_VECTORS) return 128;\n" ++
-        "    if (p === gl.MAX_FRAGMENT_UNIFORM_VECTORS) return 128;\n" ++
-        "    if (p === gl.MAX_VARYING_VECTORS) return 8;\n" ++
-        "    if (p === gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS) return 8;\n" ++
-        "    if (p === gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) return 8;\n" ++
-        "    if (p === gl.ALIASED_LINE_WIDTH_RANGE) return [1, 1];\n" ++
-        "    if (p === gl.ALIASED_POINT_SIZE_RANGE) return [1, 1];\n" ++
-        "    if (p === gl.MAX_VIEWPORT_DIMS) return [gl.drawingBufferWidth || 800, gl.drawingBufferHeight || 600];\n" ++
-        "    return null;\n" ++
-        "  };\n" ++
-        "}\n";
-
-    const val = c.JS_Eval(ctx, script.ptr, script.len, "gl_stubs", 0);
-    if (val == c.JS_EXCEPTION) {
-        dumpException(ctx);
-        return error.EvalFailed;
-    }
-}
-
 const GL_ARRAY_BUFFER: u32 = 34962;
 const GL_ELEMENT_ARRAY_BUFFER: u32 = 34963;
 const GL_VERTEX_SHADER: u32 = 35633;
@@ -314,6 +323,99 @@ const GL_TRIANGLES: u32 = 0x0004;
 const GL_TRIANGLE_STRIP: u32 = 0x0005;
 const GL_LINES: u32 = 0x0001;
 const GL_POINTS: u32 = 0x0000;
+const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
+const GL_DEPTH_BUFFER_BIT: u32 = 0x00000100;
+const GL_STENCIL_BUFFER_BIT: u32 = 0x00000400;
+const GL_DEPTH_TEST: u32 = 0x0B71;
+const GL_STENCIL_TEST: u32 = 0x0B90;
+const GL_STENCIL_FUNC: u32 = 0x0B92;
+const GL_STENCIL_VALUE_MASK: u32 = 0x0B93;
+const GL_STENCIL_FAIL: u32 = 0x0B94;
+const GL_STENCIL_PASS_DEPTH_FAIL: u32 = 0x0B95;
+const GL_STENCIL_PASS_DEPTH_PASS: u32 = 0x0B96;
+const GL_STENCIL_REF: u32 = 0x0B97;
+const GL_STENCIL_WRITEMASK: u32 = 0x0B98;
+const GL_STENCIL_BACK_FUNC: u32 = 0x8800;
+const GL_STENCIL_BACK_FAIL: u32 = 0x8801;
+const GL_STENCIL_BACK_PASS_DEPTH_FAIL: u32 = 0x8802;
+const GL_STENCIL_BACK_PASS_DEPTH_PASS: u32 = 0x8803;
+const GL_STENCIL_BACK_REF: u32 = 0x8CA3;
+const GL_STENCIL_BACK_VALUE_MASK: u32 = 0x8CA4;
+const GL_STENCIL_BACK_WRITEMASK: u32 = 0x8CA5;
+const GL_BLEND: u32 = 0x0BE2;
+const GL_CULL_FACE: u32 = 0x0B44;
+const GL_POLYGON_OFFSET_FILL: u32 = 0x8037;
+const GL_SCISSOR_TEST: u32 = 0x0C11;
+const GL_SAMPLE_ALPHA_TO_COVERAGE: u32 = 0x809E;
+const GL_FUNC_ADD: u32 = 0x8006;
+const GL_FUNC_SUBTRACT: u32 = 0x800A;
+const GL_FUNC_REVERSE_SUBTRACT: u32 = 0x800B;
+const GL_ONE: u32 = 1;
+const GL_ZERO: u32 = 0;
+const GL_SRC_ALPHA: u32 = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
+const GL_SRC_COLOR: u32 = 0x0300;
+const GL_ONE_MINUS_SRC_COLOR: u32 = 0x0301;
+const GL_DST_ALPHA: u32 = 0x0304;
+const GL_ONE_MINUS_DST_ALPHA: u32 = 0x0305;
+const GL_DST_COLOR: u32 = 0x0306;
+const GL_ONE_MINUS_DST_COLOR: u32 = 0x0307;
+const GL_CONSTANT_ALPHA: u32 = 0x8003;
+const GL_ONE_MINUS_CONSTANT_ALPHA: u32 = 0x8004;
+const GL_CONSTANT_COLOR: u32 = 0x8001;
+const GL_ONE_MINUS_CONSTANT_COLOR: u32 = 0x8002;
+const GL_FRONT: u32 = 0x0404;
+const GL_BACK: u32 = 0x0405;
+const GL_FRONT_AND_BACK: u32 = 0x0408;
+const GL_CW: u32 = 0x0900;
+const GL_CCW: u32 = 0x0901;
+const GL_NEVER: u32 = 0x0200;
+const GL_LESS: u32 = 0x0201;
+const GL_EQUAL: u32 = 0x0202;
+const GL_LEQUAL: u32 = 0x0203;
+const GL_GREATER: u32 = 0x0204;
+const GL_NOTEQUAL: u32 = 0x0205;
+const GL_GEQUAL: u32 = 0x0206;
+const GL_ALWAYS: u32 = 0x0207;
+const GL_KEEP: u32 = 0x1E00;
+const GL_REPLACE: u32 = 0x1E01;
+const GL_INCR: u32 = 0x1E02;
+const GL_DECR: u32 = 0x1E03;
+const GL_INVERT: u32 = 0x150A;
+const GL_INCR_WRAP: u32 = 0x8507;
+const GL_DECR_WRAP: u32 = 0x8508;
+const GL_VIEWPORT: u32 = 0x0BA2;
+const GL_SCISSOR_BOX: u32 = 0x0C10;
+const GL_VERSION: u32 = 0x1F02;
+const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8B8C;
+const GL_VENDOR: u32 = 0x1F00;
+const GL_RENDERER: u32 = 0x1F01;
+const GL_MAX_TEXTURE_IMAGE_UNITS: u32 = 0x8872;
+const GL_MAX_VERTEX_ATTRIBS: u32 = 0x8869;
+const GL_MAX_TEXTURE_SIZE: u32 = 0x0D33;
+const GL_MAX_CUBE_MAP_TEXTURE_SIZE: u32 = 0x851C;
+const GL_MAX_VERTEX_UNIFORM_VECTORS: u32 = 0x8DFB;
+const GL_MAX_FRAGMENT_UNIFORM_VECTORS: u32 = 0x8DFD;
+const GL_MAX_VARYING_VECTORS: u32 = 0x8DFC;
+const GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS: u32 = 0x8B4C;
+const GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: u32 = 0x8B4D;
+const GL_ALIASED_LINE_WIDTH_RANGE: u32 = 0x846E;
+const GL_ALIASED_POINT_SIZE_RANGE: u32 = 0x846D;
+const GL_MAX_VIEWPORT_DIMS: u32 = 0x0D3A;
+const GL_SAMPLES: u32 = 0x80A9;
+const GL_MAX_SAMPLES: u32 = 0x8D57;
+const GL_IMPLEMENTATION_COLOR_READ_FORMAT: u32 = 0x8B9B;
+const GL_IMPLEMENTATION_COLOR_READ_TYPE: u32 = 0x8B9A;
+const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
+const GL_UNPACK_ROW_LENGTH: u32 = 0x0CF2;
+const GL_UNPACK_SKIP_PIXELS: u32 = 0x0CF4;
+const GL_UNPACK_SKIP_ROWS: u32 = 0x0CF3;
+const GL_UNPACK_FLIP_Y_WEBGL: u32 = 0x9240;
+const GL_UNPACK_PREMULTIPLY_ALPHA_WEBGL: u32 = 0x9241;
+const GL_UNPACK_COLORSPACE_CONVERSION_WEBGL: u32 = 0x9243;
+const GL_RGBA: u32 = 0x1908;
+const GL_UNSIGNED_BYTE: u32 = 0x1401;
+const GL_NO_ERROR: u32 = 0;
 const MaxUniformFloatCount: usize = @as(usize, @intCast(webgl_program.MaxUniformArrayCount)) * 16;
 
 fn bufferIdToU32(id: webgl.BufferId) u32 {
@@ -636,21 +738,513 @@ export fn js_dom_getContext(ctx: *c.JSContext, this_val: *c.JSValue, argc: c_int
         return c.JS_NULL;
     }
 
-    const ctx_obj = c.JS_NewObject(ctx);
-    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "__proto__", gl_val);
-
     var width: i32 = 0;
     var height: i32 = 0;
     const width_val = c.JS_GetPropertyStr(ctx, canvas, "width");
     _ = c.JS_ToInt32(ctx, &width, width_val);
     const height_val = c.JS_GetPropertyStr(ctx, canvas, "height");
     _ = c.JS_ToInt32(ctx, &height, height_val);
-    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "drawingBufferWidth", c.JS_NewInt32(ctx, width));
-    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "drawingBufferHeight", c.JS_NewInt32(ctx, height));
-    _ = c.JS_SetPropertyStr(ctx, ctx_obj, "canvas", canvas);
+    _ = c.JS_SetPropertyStr(ctx, gl_val, "drawingBufferWidth", c.JS_NewInt32(ctx, width));
+    _ = c.JS_SetPropertyStr(ctx, gl_val, "drawingBufferHeight", c.JS_NewInt32(ctx, height));
+    _ = c.JS_SetPropertyStr(ctx, gl_val, "canvas", canvas);
 
-    _ = c.JS_SetPropertyStr(ctx, canvas, "_ctx", ctx_obj);
-    return ctx_obj;
+    g_gl_state.viewport = .{ 0, 0, width, height };
+    g_gl_state.scissor = .{ 0, 0, width, height };
+    webgl_draw.setViewport(0, 0, width, height);
+    webgl_draw.setScissor(0, 0, width, height);
+
+    _ = c.JS_SetPropertyStr(ctx, canvas, "_ctx", gl_val);
+    return gl_val;
+}
+
+fn setEnableState(cap: u32, enabled: bool) void {
+    switch (cap) {
+        GL_DEPTH_TEST => g_gl_state.enabled_depth_test = enabled,
+        GL_STENCIL_TEST => g_gl_state.enabled_stencil_test = enabled,
+        GL_BLEND => g_gl_state.enabled_blend = enabled,
+        GL_CULL_FACE => g_gl_state.enabled_cull_face = enabled,
+        GL_POLYGON_OFFSET_FILL => g_gl_state.enabled_polygon_offset = enabled,
+        GL_SCISSOR_TEST => g_gl_state.enabled_scissor_test = enabled,
+        GL_SAMPLE_ALPHA_TO_COVERAGE => g_gl_state.enabled_sample_alpha_to_coverage = enabled,
+        else => {},
+    }
+}
+
+fn applyStencilFaceU32(face: u32, front: *u32, back: *u32, value: u32) void {
+    switch (face) {
+        GL_FRONT => front.* = value,
+        GL_BACK => back.* = value,
+        GL_FRONT_AND_BACK => {
+            front.* = value;
+            back.* = value;
+        },
+        else => {},
+    }
+}
+
+fn applyStencilFaceU8(face: u32, front: *u8, back: *u8, value: u8) void {
+    switch (face) {
+        GL_FRONT => front.* = value,
+        GL_BACK => back.* = value,
+        GL_FRONT_AND_BACK => {
+            front.* = value;
+            back.* = value;
+        },
+        else => {},
+    }
+}
+
+export fn js_gl_getParameter(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var pname: u32 = 0;
+    if (c.JS_ToUint32(ctx, &pname, argv[0]) != 0) return c.JS_EXCEPTION;
+    switch (pname) {
+        GL_VERSION => {
+            const val = "WebGL 1.0 (three-native)";
+            return c.JS_NewStringLen(ctx, val.ptr, val.len);
+        },
+        GL_SHADING_LANGUAGE_VERSION => {
+            const val = "WebGL GLSL ES 1.0";
+            return c.JS_NewStringLen(ctx, val.ptr, val.len);
+        },
+        GL_VENDOR => {
+            const val = "three-native";
+            return c.JS_NewStringLen(ctx, val.ptr, val.len);
+        },
+        GL_RENDERER => {
+            const val = "sokol";
+            return c.JS_NewStringLen(ctx, val.ptr, val.len);
+        },
+        GL_MAX_TEXTURE_IMAGE_UNITS => return c.JS_NewInt32(ctx, 8),
+        GL_MAX_VERTEX_ATTRIBS => return c.JS_NewInt32(ctx, 16),
+        GL_MAX_TEXTURE_SIZE => return c.JS_NewInt32(ctx, 4096),
+        GL_MAX_CUBE_MAP_TEXTURE_SIZE => return c.JS_NewInt32(ctx, 4096),
+        GL_MAX_VERTEX_UNIFORM_VECTORS => return c.JS_NewInt32(ctx, 128),
+        GL_MAX_FRAGMENT_UNIFORM_VECTORS => return c.JS_NewInt32(ctx, 128),
+        GL_MAX_VARYING_VECTORS => return c.JS_NewInt32(ctx, 8),
+        GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS => return c.JS_NewInt32(ctx, 8),
+        GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS => return c.JS_NewInt32(ctx, 8),
+        GL_ALIASED_LINE_WIDTH_RANGE => return jsArray2(ctx, 1, 1),
+        GL_ALIASED_POINT_SIZE_RANGE => return jsArray2(ctx, 1, 1),
+        GL_MAX_VIEWPORT_DIMS => return jsArray2(ctx, 4096, 4096),
+        GL_VIEWPORT => return jsArray4(ctx, g_gl_state.viewport[0], g_gl_state.viewport[1], g_gl_state.viewport[2], g_gl_state.viewport[3]),
+        GL_SCISSOR_BOX => return jsArray4(ctx, g_gl_state.scissor[0], g_gl_state.scissor[1], g_gl_state.scissor[2], g_gl_state.scissor[3]),
+        GL_SAMPLES => return c.JS_NewInt32(ctx, 1),
+        GL_MAX_SAMPLES => return c.JS_NewInt32(ctx, 1),
+        GL_IMPLEMENTATION_COLOR_READ_FORMAT => return c.JS_NewInt32(ctx, @intCast(GL_RGBA)),
+        GL_IMPLEMENTATION_COLOR_READ_TYPE => return c.JS_NewInt32(ctx, @intCast(GL_UNSIGNED_BYTE)),
+        GL_UNPACK_ALIGNMENT => return c.JS_NewInt32(ctx, g_gl_state.unpack_alignment),
+        GL_UNPACK_ROW_LENGTH => return c.JS_NewInt32(ctx, g_gl_state.unpack_row_length),
+        GL_UNPACK_SKIP_PIXELS => return c.JS_NewInt32(ctx, g_gl_state.unpack_skip_pixels),
+        GL_UNPACK_SKIP_ROWS => return c.JS_NewInt32(ctx, g_gl_state.unpack_skip_rows),
+        GL_UNPACK_FLIP_Y_WEBGL => return if (g_gl_state.unpack_flip_y) c.JS_TRUE else c.JS_FALSE,
+        GL_UNPACK_PREMULTIPLY_ALPHA_WEBGL => return if (g_gl_state.unpack_premultiply_alpha) c.JS_TRUE else c.JS_FALSE,
+        GL_UNPACK_COLORSPACE_CONVERSION_WEBGL => return c.JS_NewInt32(ctx, g_gl_state.unpack_colorspace_conversion),
+        GL_STENCIL_FUNC => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_func_front)),
+        GL_STENCIL_REF => return c.JS_NewInt32(ctx, g_gl_state.stencil_ref_front),
+        GL_STENCIL_VALUE_MASK => return c.JS_NewInt32(ctx, g_gl_state.stencil_value_mask_front),
+        GL_STENCIL_WRITEMASK => return c.JS_NewInt32(ctx, g_gl_state.stencil_write_mask_front),
+        GL_STENCIL_FAIL => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_fail_front)),
+        GL_STENCIL_PASS_DEPTH_FAIL => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_zfail_front)),
+        GL_STENCIL_PASS_DEPTH_PASS => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_zpass_front)),
+        GL_STENCIL_BACK_FUNC => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_func_back)),
+        GL_STENCIL_BACK_REF => return c.JS_NewInt32(ctx, g_gl_state.stencil_ref_back),
+        GL_STENCIL_BACK_VALUE_MASK => return c.JS_NewInt32(ctx, g_gl_state.stencil_value_mask_back),
+        GL_STENCIL_BACK_WRITEMASK => return c.JS_NewInt32(ctx, g_gl_state.stencil_write_mask_back),
+        GL_STENCIL_BACK_FAIL => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_fail_back)),
+        GL_STENCIL_BACK_PASS_DEPTH_FAIL => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_zfail_back)),
+        GL_STENCIL_BACK_PASS_DEPTH_PASS => return c.JS_NewInt32(ctx, @intCast(g_gl_state.stencil_zpass_back)),
+        GL_DEPTH_TEST => return if (g_gl_state.enabled_depth_test) c.JS_TRUE else c.JS_FALSE,
+        GL_STENCIL_TEST => return if (g_gl_state.enabled_stencil_test) c.JS_TRUE else c.JS_FALSE,
+        GL_BLEND => return if (g_gl_state.enabled_blend) c.JS_TRUE else c.JS_FALSE,
+        GL_CULL_FACE => return if (g_gl_state.enabled_cull_face) c.JS_TRUE else c.JS_FALSE,
+        GL_POLYGON_OFFSET_FILL => return if (g_gl_state.enabled_polygon_offset) c.JS_TRUE else c.JS_FALSE,
+        GL_SCISSOR_TEST => return if (g_gl_state.enabled_scissor_test) c.JS_TRUE else c.JS_FALSE,
+        GL_SAMPLE_ALPHA_TO_COVERAGE => return if (g_gl_state.enabled_sample_alpha_to_coverage) c.JS_TRUE else c.JS_FALSE,
+        else => return c.JS_NULL,
+    }
+}
+
+export fn js_gl_getExtension(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    _ = ctx;
+    return c.JS_NULL;
+}
+
+export fn js_gl_getSupportedExtensions(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_NewArray(ctx, 0);
+}
+
+export fn js_gl_getContextAttributes(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    const obj = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, obj, "alpha", c.JS_TRUE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "depth", c.JS_TRUE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "stencil", c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "antialias", c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "premultipliedAlpha", c.JS_TRUE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "preserveDrawingBuffer", c.JS_FALSE);
+    return obj;
+}
+
+export fn js_gl_stencilFunc(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 3) return c.JS_UNDEFINED;
+    var func: u32 = 0;
+    var ref: i32 = 0;
+    var mask: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &func, argv[0]);
+    _ = c.JS_ToInt32(ctx, &ref, argv[1]);
+    _ = c.JS_ToUint32(ctx, &mask, argv[2]);
+    const ref_u8 = clampU8(ref);
+    const mask_u8 = clampU8(@intCast(mask));
+    g_gl_state.stencil_func_front = func;
+    g_gl_state.stencil_func_back = func;
+    g_gl_state.stencil_ref_front = ref_u8;
+    g_gl_state.stencil_ref_back = ref_u8;
+    g_gl_state.stencil_value_mask_front = mask_u8;
+    g_gl_state.stencil_value_mask_back = mask_u8;
+    webgl_draw.setStencilFunc(func, ref, mask);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_stencilFuncSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 4) return c.JS_UNDEFINED;
+    var face: u32 = 0;
+    var func: u32 = 0;
+    var ref: i32 = 0;
+    var mask: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &face, argv[0]);
+    _ = c.JS_ToUint32(ctx, &func, argv[1]);
+    _ = c.JS_ToInt32(ctx, &ref, argv[2]);
+    _ = c.JS_ToUint32(ctx, &mask, argv[3]);
+    const ref_u8 = clampU8(ref);
+    const mask_u8 = clampU8(@intCast(mask));
+    applyStencilFaceU32(face, &g_gl_state.stencil_func_front, &g_gl_state.stencil_func_back, func);
+    applyStencilFaceU8(face, &g_gl_state.stencil_ref_front, &g_gl_state.stencil_ref_back, ref_u8);
+    applyStencilFaceU8(face, &g_gl_state.stencil_value_mask_front, &g_gl_state.stencil_value_mask_back, mask_u8);
+    webgl_draw.setStencilFuncSeparate(face, func, ref, mask);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_stencilMask(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var mask: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &mask, argv[0]);
+    const mask_u8 = clampU8(@intCast(mask));
+    g_gl_state.stencil_write_mask_front = mask_u8;
+    g_gl_state.stencil_write_mask_back = mask_u8;
+    webgl_draw.setStencilMask(mask);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_stencilMaskSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var face: u32 = 0;
+    var mask: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &face, argv[0]);
+    _ = c.JS_ToUint32(ctx, &mask, argv[1]);
+    const mask_u8 = clampU8(@intCast(mask));
+    applyStencilFaceU8(face, &g_gl_state.stencil_write_mask_front, &g_gl_state.stencil_write_mask_back, mask_u8);
+    webgl_draw.setStencilMaskSeparate(face, mask);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_stencilOp(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 3) return c.JS_UNDEFINED;
+    var fail: u32 = 0;
+    var zfail: u32 = 0;
+    var zpass: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &fail, argv[0]);
+    _ = c.JS_ToUint32(ctx, &zfail, argv[1]);
+    _ = c.JS_ToUint32(ctx, &zpass, argv[2]);
+    g_gl_state.stencil_fail_front = fail;
+    g_gl_state.stencil_zfail_front = zfail;
+    g_gl_state.stencil_zpass_front = zpass;
+    g_gl_state.stencil_fail_back = fail;
+    g_gl_state.stencil_zfail_back = zfail;
+    g_gl_state.stencil_zpass_back = zpass;
+    webgl_draw.setStencilOp(fail, zfail, zpass);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_stencilOpSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 4) return c.JS_UNDEFINED;
+    var face: u32 = 0;
+    var fail: u32 = 0;
+    var zfail: u32 = 0;
+    var zpass: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &face, argv[0]);
+    _ = c.JS_ToUint32(ctx, &fail, argv[1]);
+    _ = c.JS_ToUint32(ctx, &zfail, argv[2]);
+    _ = c.JS_ToUint32(ctx, &zpass, argv[3]);
+    applyStencilFaceU32(face, &g_gl_state.stencil_fail_front, &g_gl_state.stencil_fail_back, fail);
+    applyStencilFaceU32(face, &g_gl_state.stencil_zfail_front, &g_gl_state.stencil_zfail_back, zfail);
+    applyStencilFaceU32(face, &g_gl_state.stencil_zpass_front, &g_gl_state.stencil_zpass_back, zpass);
+    webgl_draw.setStencilOpSeparate(face, fail, zfail, zpass);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_enable(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var cap: u32 = 0;
+    if (c.JS_ToUint32(ctx, &cap, argv[0]) != 0) return c.JS_EXCEPTION;
+    setEnableState(cap, true);
+    switch (cap) {
+        GL_SCISSOR_TEST => webgl_draw.setScissorEnabled(true),
+        GL_DEPTH_TEST => webgl_draw.setDepthTestEnabled(true),
+        GL_STENCIL_TEST => webgl_draw.setStencilEnabled(true),
+        GL_CULL_FACE => webgl_draw.setCullEnabled(true),
+        GL_BLEND => webgl_draw.setBlendEnabled(true),
+        GL_POLYGON_OFFSET_FILL => webgl_draw.setPolygonOffsetEnabled(true),
+        GL_SAMPLE_ALPHA_TO_COVERAGE => webgl_draw.setAlphaToCoverageEnabled(true),
+        else => {},
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_disable(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var cap: u32 = 0;
+    if (c.JS_ToUint32(ctx, &cap, argv[0]) != 0) return c.JS_EXCEPTION;
+    setEnableState(cap, false);
+    switch (cap) {
+        GL_SCISSOR_TEST => webgl_draw.setScissorEnabled(false),
+        GL_DEPTH_TEST => webgl_draw.setDepthTestEnabled(false),
+        GL_STENCIL_TEST => webgl_draw.setStencilEnabled(false),
+        GL_CULL_FACE => webgl_draw.setCullEnabled(false),
+        GL_BLEND => webgl_draw.setBlendEnabled(false),
+        GL_POLYGON_OFFSET_FILL => webgl_draw.setPolygonOffsetEnabled(false),
+        GL_SAMPLE_ALPHA_TO_COVERAGE => webgl_draw.setAlphaToCoverageEnabled(false),
+        else => {},
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_viewport(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 4) return c.JS_UNDEFINED;
+    var x: i32 = 0;
+    var y: i32 = 0;
+    var w: i32 = 0;
+    var h: i32 = 0;
+    _ = c.JS_ToInt32(ctx, &x, argv[0]);
+    _ = c.JS_ToInt32(ctx, &y, argv[1]);
+    _ = c.JS_ToInt32(ctx, &w, argv[2]);
+    _ = c.JS_ToInt32(ctx, &h, argv[3]);
+    g_gl_state.viewport = .{ x, y, w, h };
+    webgl_draw.setViewport(x, y, w, h);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_clearColor(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 4) return c.JS_UNDEFINED;
+    var r: f64 = 0;
+    var g: f64 = 0;
+    var b: f64 = 0;
+    var a: f64 = 0;
+    _ = c.JS_ToNumber(ctx, &r, argv[0]);
+    _ = c.JS_ToNumber(ctx, &g, argv[1]);
+    _ = c.JS_ToNumber(ctx, &b, argv[2]);
+    _ = c.JS_ToNumber(ctx, &a, argv[3]);
+    g_gl_state.clear_color = .{ @floatCast(r), @floatCast(g), @floatCast(b), @floatCast(a) };
+    webgl_draw.setClearColor(@floatCast(r), @floatCast(g), @floatCast(b), @floatCast(a));
+    if (getRuntime(ctx)) |rt| {
+        rt.shared.clear_color = .{ @floatCast(r), @floatCast(g), @floatCast(b) };
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_clear(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var mask: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &mask, argv[0]);
+    webgl_draw.requestClear(mask);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_clearDepth(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var val: f64 = 1.0;
+    _ = c.JS_ToNumber(ctx, &val, argv[0]);
+    g_gl_state.clear_depth = @floatCast(val);
+    webgl_draw.setClearDepth(@floatCast(val));
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_clearStencil(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var val: i32 = 0;
+    _ = c.JS_ToInt32(ctx, &val, argv[0]);
+    g_gl_state.clear_stencil = val;
+    webgl_draw.setClearStencil(val);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_depthFunc(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var val: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &val, argv[0]);
+    g_gl_state.depth_func = val;
+    webgl_draw.setDepthFunc(val);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_depthMask(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var val: i32 = 0;
+    _ = c.JS_ToInt32(ctx, &val, argv[0]);
+    g_gl_state.depth_mask = val != 0;
+    webgl_draw.setDepthMask(val != 0);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_colorMask(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 4) return c.JS_UNDEFINED;
+    var r: i32 = 0;
+    var g: i32 = 0;
+    var b: i32 = 0;
+    var a: i32 = 0;
+    _ = c.JS_ToInt32(ctx, &r, argv[0]);
+    _ = c.JS_ToInt32(ctx, &g, argv[1]);
+    _ = c.JS_ToInt32(ctx, &b, argv[2]);
+    _ = c.JS_ToInt32(ctx, &a, argv[3]);
+    g_gl_state.color_mask = .{ r != 0, g != 0, b != 0, a != 0 };
+    webgl_draw.setColorMask(r != 0, g != 0, b != 0, a != 0);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_cullFace(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var val: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &val, argv[0]);
+    g_gl_state.cull_face = val;
+    webgl_draw.setCullFace(val);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_frontFace(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var val: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &val, argv[0]);
+    g_gl_state.front_face = val;
+    webgl_draw.setFrontFace(val);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_blendFunc(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var src: u32 = 0;
+    var dst: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &src, argv[0]);
+    _ = c.JS_ToUint32(ctx, &dst, argv[1]);
+    g_gl_state.blend_src = src;
+    g_gl_state.blend_dst = dst;
+    g_gl_state.blend_src_alpha = src;
+    g_gl_state.blend_dst_alpha = dst;
+    webgl_draw.setBlendFunc(src, dst);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_blendFuncSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 4) return c.JS_UNDEFINED;
+    var src: u32 = 0;
+    var dst: u32 = 0;
+    var src_a: u32 = 0;
+    var dst_a: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &src, argv[0]);
+    _ = c.JS_ToUint32(ctx, &dst, argv[1]);
+    _ = c.JS_ToUint32(ctx, &src_a, argv[2]);
+    _ = c.JS_ToUint32(ctx, &dst_a, argv[3]);
+    g_gl_state.blend_src = src;
+    g_gl_state.blend_dst = dst;
+    g_gl_state.blend_src_alpha = src_a;
+    g_gl_state.blend_dst_alpha = dst_a;
+    webgl_draw.setBlendFuncSeparate(src, dst, src_a, dst_a);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_blendEquation(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var eq: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &eq, argv[0]);
+    g_gl_state.blend_eq = eq;
+    g_gl_state.blend_eq_alpha = eq;
+    webgl_draw.setBlendEquation(eq);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_blendEquationSeparate(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var eq: u32 = 0;
+    var eq_a: u32 = 0;
+    _ = c.JS_ToUint32(ctx, &eq, argv[0]);
+    _ = c.JS_ToUint32(ctx, &eq_a, argv[1]);
+    g_gl_state.blend_eq = eq;
+    g_gl_state.blend_eq_alpha = eq_a;
+    webgl_draw.setBlendEquationSeparate(eq, eq_a);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_scissor(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 4) return c.JS_UNDEFINED;
+    var x: i32 = 0;
+    var y: i32 = 0;
+    var w: i32 = 0;
+    var h: i32 = 0;
+    _ = c.JS_ToInt32(ctx, &x, argv[0]);
+    _ = c.JS_ToInt32(ctx, &y, argv[1]);
+    _ = c.JS_ToInt32(ctx, &w, argv[2]);
+    _ = c.JS_ToInt32(ctx, &h, argv[3]);
+    g_gl_state.scissor = .{ x, y, w, h };
+    webgl_draw.setScissor(x, y, w, h);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_lineWidth(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+    var val: f64 = 1.0;
+    _ = c.JS_ToNumber(ctx, &val, argv[0]);
+    g_gl_state.line_width = @floatCast(val);
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_polygonOffset(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var factor: f64 = 0;
+    var units: f64 = 0;
+    _ = c.JS_ToNumber(ctx, &factor, argv[0]);
+    _ = c.JS_ToNumber(ctx, &units, argv[1]);
+    g_gl_state.polygon_offset = .{ @floatCast(factor), @floatCast(units) };
+    webgl_draw.setPolygonOffset(@floatCast(factor), @floatCast(units));
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_pixelStorei(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+    var pname: u32 = 0;
+    var param: i32 = 0;
+    _ = c.JS_ToUint32(ctx, &pname, argv[0]);
+    _ = c.JS_ToInt32(ctx, &param, argv[1]);
+    switch (pname) {
+        GL_UNPACK_ALIGNMENT => g_gl_state.unpack_alignment = param,
+        GL_UNPACK_ROW_LENGTH => g_gl_state.unpack_row_length = param,
+        GL_UNPACK_SKIP_PIXELS => g_gl_state.unpack_skip_pixels = param,
+        GL_UNPACK_SKIP_ROWS => g_gl_state.unpack_skip_rows = param,
+        GL_UNPACK_FLIP_Y_WEBGL => g_gl_state.unpack_flip_y = param != 0,
+        GL_UNPACK_PREMULTIPLY_ALPHA_WEBGL => g_gl_state.unpack_premultiply_alpha = param != 0,
+        GL_UNPACK_COLORSPACE_CONVERSION_WEBGL => g_gl_state.unpack_colorspace_conversion = param,
+        else => {},
+    }
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_getError(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    return c.JS_NewInt32(ctx, @intCast(GL_NO_ERROR));
+}
+
+export fn js_gl_getShaderPrecisionFormat(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+    const obj = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, obj, "rangeMin", c.JS_NewInt32(ctx, 127));
+    _ = c.JS_SetPropertyStr(ctx, obj, "rangeMax", c.JS_NewInt32(ctx, 127));
+    _ = c.JS_SetPropertyStr(ctx, obj, "precision", c.JS_NewInt32(ctx, 23));
+    return obj;
 }
 
 export fn js_gl_createBuffer(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -1425,7 +2019,6 @@ test "gl capability stubs return defaults" {
     defer rt.deinit();
     rt.makeCurrent();
     try rt.installDomStubs();
-    try rt.installGlStubs();
 
     try rt.eval(
         \\var ok_ver = (gl.getParameter(gl.VERSION).indexOf('WebGL') === 0) ? 1 : 0;
@@ -1438,6 +2031,85 @@ test "gl capability stubs return defaults" {
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_tex", "test"));
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_ext", "test"));
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_attr", "test"));
+}
+
+test "gl enable/disable toggles depth cull blend" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 128 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+    try rt.installDomStubs();
+
+    try rt.eval(
+        \\gl.enable(gl.DEPTH_TEST);
+        \\gl.enable(gl.CULL_FACE);
+        \\gl.enable(gl.BLEND);
+        \\var ok_depth = gl.getParameter(gl.DEPTH_TEST) ? 1 : 0;
+        \\var ok_cull = gl.getParameter(gl.CULL_FACE) ? 1 : 0;
+        \\var ok_blend = gl.getParameter(gl.BLEND) ? 1 : 0;
+        \\gl.disable(gl.DEPTH_TEST);
+        \\gl.disable(gl.CULL_FACE);
+        \\gl.disable(gl.BLEND);
+        \\var ok_depth_off = gl.getParameter(gl.DEPTH_TEST) ? 0 : 1;
+        \\var ok_cull_off = gl.getParameter(gl.CULL_FACE) ? 0 : 1;
+        \\var ok_blend_off = gl.getParameter(gl.BLEND) ? 0 : 1;
+    , "test");
+
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_depth", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_cull", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_blend", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_depth_off", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_cull_off", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_blend_off", "test"));
+}
+
+test "gl stencil state updates" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 128 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+    try rt.installDomStubs();
+
+    try rt.eval(
+        \\gl.enable(gl.STENCIL_TEST);
+        \\gl.stencilFunc(gl.ALWAYS, 7, 0xAA);
+        \\gl.stencilMask(0x0F);
+        \\gl.stencilOp(gl.KEEP, gl.INCR, gl.DECR);
+        \\gl.stencilFuncSeparate(gl.BACK, gl.NEVER, 3, 0xF0);
+        \\gl.stencilMaskSeparate(gl.BACK, 0xF0);
+        \\gl.stencilOpSeparate(gl.BACK, gl.REPLACE, gl.INVERT, gl.INCR_WRAP);
+        \\var ok_func = (gl.getParameter(gl.STENCIL_FUNC) === gl.ALWAYS) ? 1 : 0;
+        \\var ok_ref = (gl.getParameter(gl.STENCIL_REF) === 7) ? 1 : 0;
+        \\var ok_mask = (gl.getParameter(gl.STENCIL_VALUE_MASK) === 0xAA) ? 1 : 0;
+        \\var ok_wmask = (gl.getParameter(gl.STENCIL_WRITEMASK) === 0x0F) ? 1 : 0;
+        \\var ok_fail = (gl.getParameter(gl.STENCIL_FAIL) === gl.KEEP) ? 1 : 0;
+        \\var ok_zfail = (gl.getParameter(gl.STENCIL_PASS_DEPTH_FAIL) === gl.INCR) ? 1 : 0;
+        \\var ok_zpass = (gl.getParameter(gl.STENCIL_PASS_DEPTH_PASS) === gl.DECR) ? 1 : 0;
+        \\var ok_bfunc = (gl.getParameter(gl.STENCIL_BACK_FUNC) === gl.NEVER) ? 1 : 0;
+        \\var ok_bref = (gl.getParameter(gl.STENCIL_BACK_REF) === 3) ? 1 : 0;
+        \\var ok_bmask = (gl.getParameter(gl.STENCIL_BACK_VALUE_MASK) === 0xF0) ? 1 : 0;
+        \\var ok_bwmask = (gl.getParameter(gl.STENCIL_BACK_WRITEMASK) === 0xF0) ? 1 : 0;
+        \\var ok_bfail = (gl.getParameter(gl.STENCIL_BACK_FAIL) === gl.REPLACE) ? 1 : 0;
+        \\var ok_bzfail = (gl.getParameter(gl.STENCIL_BACK_PASS_DEPTH_FAIL) === gl.INVERT) ? 1 : 0;
+        \\var ok_bzpass = (gl.getParameter(gl.STENCIL_BACK_PASS_DEPTH_PASS) === gl.INCR_WRAP) ? 1 : 0;
+    , "test");
+
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_func", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_ref", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_mask", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_wmask", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_fail", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_zfail", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_zpass", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_bfunc", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_bref", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_bmask", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_bwmask", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_bfail", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_bzfail", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_bzpass", "test"));
 }
 
 test "JS gl buffer lifecycle hits backend" {
