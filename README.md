@@ -59,6 +59,11 @@ zig build run
 
 Early stage. Milestones are tracked in `KICKSTART.md`.
 
+## Docs
+
+- Design docs (GitHub Pages): https://mattneel.github.io/three-native/docs/design/
+- Local mdbook source: `docs/design`
+
 ## Contributing
 
 If you want to help:
