@@ -617,6 +617,53 @@ export fn js_gc(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) cal
     return c.JS_UNDEFINED;
 }
 
+const SanitizedScript = struct {
+    bytes: []const u8,
+    owned: bool,
+};
+
+fn sanitizeScriptBytes(allocator: std.mem.Allocator, input: []const u8) !SanitizedScript {
+    var start: usize = 0;
+    if (input.len >= 3 and input[0] == 0xEF and input[1] == 0xBB and input[2] == 0xBF) {
+        start = 3;
+    }
+
+    var needs_copy = false;
+    var idx: usize = start;
+    while (idx < input.len) : (idx += 1) {
+        const b = input[idx];
+        if (b == '\r' or b == 0x1A or b == 0x00) {
+            needs_copy = true;
+            break;
+        }
+    }
+
+    if (!needs_copy) {
+        return .{ .bytes = input[start..], .owned = false };
+    }
+
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    idx = start;
+    while (idx < input.len) : (idx += 1) {
+        const b = input[idx];
+        if (b == '\r') {
+            if (idx + 1 < input.len and input[idx + 1] == '\n') {
+                idx += 1;
+            }
+            try out.append('\n');
+            continue;
+        }
+        if (b == 0x1A or b == 0x00) {
+            continue;
+        }
+        try out.append(b);
+    }
+
+    return .{ .bytes = try out.toOwnedSlice(), .owned = true };
+}
+
 export fn js_load(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
     if (argc < 1) {
         return throwTypeError(ctx, "load requires a filename");
@@ -638,7 +685,12 @@ export fn js_load(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSVa
     };
     defer rt.allocator.free(data);
 
-    return c.JS_Eval(ctx, data.ptr, data.len, filename, 0);
+    const sanitized = sanitizeScriptBytes(rt.allocator, data) catch {
+        return throwInternalError(ctx, "failed to sanitize script");
+    };
+    defer if (sanitized.owned) rt.allocator.free(sanitized.bytes);
+
+    return c.JS_Eval(ctx, sanitized.bytes.ptr, sanitized.bytes.len, filename, 0);
 }
 
 export fn js_setTimeout(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
