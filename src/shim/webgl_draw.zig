@@ -10,6 +10,9 @@ const webgl = @import("webgl.zig");
 const webgl_state = @import("webgl_state.zig");
 const webgl_program = @import("webgl_program.zig");
 
+// Scoped logger for draw queue debug tracing
+const log = std.log.scoped(.webgl_draw);
+
 const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
 const GL_DEPTH_BUFFER_BIT: u32 = 0x00000100;
 const GL_STENCIL_BUFFER_BIT: u32 = 0x00000400;
@@ -362,6 +365,7 @@ pub fn setStencilOpSeparate(face: u32, fail: u32, zfail: u32, zpass: u32) void {
 
 pub fn consumePassAction(default_action: sg.PassAction) sg.PassAction {
     if (!g_state.clear_pending) return default_action;
+    log.debug("consumePassAction: clear_mask={x} color=[{d:.2},{d:.2},{d:.2},{d:.2}]", .{ g_state.clear_mask, g_state.clear_color.r, g_state.clear_color.g, g_state.clear_color.b, g_state.clear_color.a });
     var action = sg.PassAction{};
     if ((g_state.clear_mask & GL_COLOR_BUFFER_BIT) != 0) {
         action.colors[0].load_action = .CLEAR;
@@ -609,14 +613,16 @@ fn validateCommand(
 
 pub fn flush() void {
     if (g_state.command_count == 0) return;
+    log.debug("flush: processing {d} commands", .{g_state.command_count});
     defer g_state.command_count = 0;
     if (!sg.isvalid()) return;
 
     const mgr = webgl_state.globalBufferManager();
     const programs = webgl_program.globalProgramTable();
 
-    for (g_state.commands[0..g_state.command_count]) |cmd| {
-        const prog = validateCommand(&cmd, mgr, programs) catch {
+    for (g_state.commands[0..g_state.command_count], 0..) |cmd, cmd_idx| {
+        const prog = validateCommand(&cmd, mgr, programs) catch |err| {
+            log.debug("flush: command {d} validation failed: {s}", .{ cmd_idx, @errorName(err) });
             continue;
         };
 
@@ -744,20 +750,24 @@ pub fn flush() void {
         const pip = getCachedPipeline(key, pip_desc) orelse continue;
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
+        log.debug("flush: vs_uniforms.size={d} fs_uniforms.size={d}", .{ prog.vs_uniforms.size, prog.fs_uniforms.size });
         if (prog.vs_uniforms.size > 0) {
             const size = @as(usize, prog.vs_uniforms.size);
             const slice = prog.vs_uniforms.buffer[0..size];
+            log.debug("flush: applying VS uniforms, size={d}", .{size});
             sg.applyUniforms(0, .{ .ptr = slice.ptr, .size = slice.len });
         }
         if (prog.fs_uniforms.size > 0) {
             const size = @as(usize, prog.fs_uniforms.size);
             const slice = prog.fs_uniforms.buffer[0..size];
+            log.debug("flush: applying FS uniforms, size={d}", .{size});
             sg.applyUniforms(1, .{ .ptr = slice.ptr, .size = slice.len });
         }
         const base = if (cmd.kind == .arrays) cmd.first else 0;
         const base_u32: u32 = if (base < 0) 0 else @intCast(base);
         const count_u32: u32 = if (cmd.count < 0) 0 else @intCast(cmd.count);
         if (count_u32 == 0) continue;
+        log.debug("flush: sg.draw base={d} count={d} kind={s}", .{ base_u32, count_u32, @tagName(cmd.kind) });
         sg.draw(base_u32, count_u32, 1);
     }
 }
@@ -782,10 +792,13 @@ fn getCachedPipeline(key: u64, desc: sg.PipelineDesc) ?sg.Pipeline {
     }
 
     const pip = sg.makePipeline(desc);
-    if (sg.queryPipelineState(pip) != .VALID) {
+    const state = sg.queryPipelineState(pip);
+    if (state != .VALID) {
+        log.debug("getCachedPipeline: failed to create pipeline, state={s}", .{@tagName(state)});
         sg.destroyPipeline(pip);
         return null;
     }
+    log.debug("getCachedPipeline: created new pipeline, depth_compare={s} cull={s}", .{ @tagName(desc.depth.compare), @tagName(desc.cull_mode) });
 
     const slot = g_state.pipeline_cache_next % MaxPipelineCacheEntries;
     g_state.pipeline_cache_next += 1;

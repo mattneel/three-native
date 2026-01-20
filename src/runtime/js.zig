@@ -17,6 +17,9 @@ const c = @cImport({
 
 extern const js_stdlib: c.JSSTDLibraryDef;
 
+// Scoped logger for WebGL debug tracing
+const log = std.log.scoped(.webgl);
+
 pub const SharedState = struct {
     clear_color: [3]f32 = .{ 0.0, 0.0, 0.0 },
     time_ms: f64 = 0,
@@ -354,6 +357,8 @@ const GL_FLOAT_VEC4: u32 = 0x8B52;
 const GL_INT_VEC2: u32 = 0x8B53;
 const GL_INT_VEC3: u32 = 0x8B54;
 const GL_INT_VEC4: u32 = 0x8B55;
+const GL_FLOAT_MAT2: u32 = 0x8B5A;
+const GL_FLOAT_MAT3: u32 = 0x8B5B;
 const GL_FLOAT_MAT4: u32 = 0x8B5C;
 const GL_SAMPLER_2D: u32 = 0x8B5E;
 const GL_SAMPLER_CUBE: u32 = 0x8B60;
@@ -1066,7 +1071,7 @@ fn freeVaoId(id: u32) bool {
     return true;
 }
 
-fn uniformTypeToGlEnum(utype: sg.UniformType) u32 {
+fn uniformTypeToGlEnum(utype: webgl_program.UniformType) u32 {
     return switch (utype) {
         .FLOAT => GL_FLOAT,
         .FLOAT2 => GL_FLOAT_VEC2,
@@ -1076,8 +1081,10 @@ fn uniformTypeToGlEnum(utype: sg.UniformType) u32 {
         .INT2 => GL_INT_VEC2,
         .INT3 => GL_INT_VEC3,
         .INT4 => GL_INT_VEC4,
+        .MAT2 => GL_FLOAT_MAT2,
+        .MAT3 => GL_FLOAT_MAT3,
         .MAT4 => GL_FLOAT_MAT4,
-        else => GL_FLOAT,
+        .INVALID => GL_FLOAT,
     };
 }
 
@@ -1893,11 +1900,16 @@ export fn js_gl_compileShader(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, arg
     if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
         return c.JS_EXCEPTION;
     }
+    log.debug("compileShader: shader={d}", .{raw});
     const table = webgl_shader.globalShaderTable();
     table.compile(shaderIdFromU32(raw)) catch |err| switch (err) {
         error.InvalidHandle => return throwTypeError(ctx, "invalid shader handle"),
-        else => return throwInternalError(ctx, "compileShader failed"),
+        else => {
+            log.debug("compileShader: failed for shader={d}", .{raw});
+            return throwInternalError(ctx, "compileShader failed");
+        },
     };
+    log.debug("compileShader: success for shader={d}", .{raw});
     return c.JS_UNDEFINED;
 }
 
@@ -1935,8 +1947,8 @@ export fn js_gl_getShaderInfoLog(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, 
     _ = table.get(shaderIdFromU32(raw)) orelse {
         return throwTypeError(ctx, "invalid shader handle");
     };
-    if (table.getInfoLog(shaderIdFromU32(raw))) |log| {
-        return c.JS_NewStringLen(ctx, @ptrCast(log.ptr), log.len);
+    if (table.getInfoLog(shaderIdFromU32(raw))) |info_log| {
+        return c.JS_NewStringLen(ctx, @ptrCast(info_log.ptr), info_log.len);
     }
     return c.JS_NewStringLen(ctx, "", 0);
 }
@@ -1992,12 +2004,17 @@ export fn js_gl_linkProgram(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv:
     if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
         return c.JS_EXCEPTION;
     }
+    log.debug("linkProgram: program={d}", .{raw});
     const programs = webgl_program.globalProgramTable();
     const shaders = webgl_shader.globalShaderTable();
     programs.link(programIdFromU32(raw), shaders) catch |err| switch (err) {
         error.InvalidHandle => return throwTypeError(ctx, "invalid program handle"),
-        else => return throwInternalError(ctx, "linkProgram failed"),
+        else => {
+            log.debug("linkProgram: failed for program={d}", .{raw});
+            return throwInternalError(ctx, "linkProgram failed");
+        },
     };
+    log.debug("linkProgram: success for program={d}", .{raw});
     return c.JS_UNDEFINED;
 }
 
@@ -2060,6 +2077,7 @@ export fn js_gl_useProgram(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
         return throwTypeError(ctx, "useProgram requires a program");
     }
     if (argv[0] == c.JS_NULL or argv[0] == c.JS_UNDEFINED) {
+        log.debug("useProgram: clearing program", .{});
         webgl_draw.clearProgram();
         return c.JS_UNDEFINED;
     }
@@ -2067,6 +2085,7 @@ export fn js_gl_useProgram(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
     if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) {
         return c.JS_EXCEPTION;
     }
+    log.debug("useProgram: program={d}", .{raw});
     webgl_draw.useProgram(programIdFromU32(raw)) catch {
         return throwTypeError(ctx, "invalid program handle");
     };
@@ -2194,6 +2213,7 @@ export fn js_gl_enableVertexAttribArray(ctx: *c.JSContext, _: *c.JSValue, argc: 
     if (c.JS_ToUint32(ctx, &idx, argv[0]) != 0) {
         return c.JS_EXCEPTION;
     }
+    log.debug("enableVertexAttribArray: index={d}", .{idx});
     webgl_draw.enableVertexAttribArray(idx) catch {
         return throwTypeError(ctx, "invalid attrib index");
     };
@@ -2249,6 +2269,7 @@ export fn js_gl_vertexAttribPointer(ctx: *c.JSContext, _: *c.JSValue, argc: c_in
     const buffer = mgr.getBoundBuffer(.array) orelse {
         return throwTypeError(ctx, "no array buffer bound");
     };
+    log.debug("vertexAttribPointer: index={d} size={d} type={d} normalized={} stride={d} offset={d}", .{ idx, size_i, type_raw, normalized_i != 0, stride_i, offset_i });
     webgl_draw.vertexAttribPointer(
         idx,
         @intCast(size_i),
@@ -2279,6 +2300,7 @@ export fn js_gl_drawArrays(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
     if (c.JS_ToInt32(ctx, &count, argv[2]) != 0) {
         return c.JS_EXCEPTION;
     }
+    log.debug("drawArrays: mode={d} first={d} count={d}", .{ mode, first, count });
     webgl_draw.drawArrays(mode, first, count) catch {
         return throwTypeError(ctx, "drawArrays failed");
     };
@@ -2312,6 +2334,7 @@ export fn js_gl_drawElements(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv
     const element = mgr.getBoundBuffer(.element_array) orelse {
         return throwTypeError(ctx, "no element array buffer bound");
     };
+    log.debug("drawElements: mode={d} count={d} type={d} offset={d}", .{ mode, count, type_raw, offset });
     webgl_draw.drawElements(mode, count, type_raw, @intCast(offset), element) catch {
         return throwTypeError(ctx, "drawElements failed");
     };
@@ -2483,6 +2506,69 @@ export fn js_gl_uniformMatrix4fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, 
     var temp: [MaxUniformFloatCount]f32 = undefined;
     const count = readFloatValues(ctx, argv[2], temp[0..]) catch {
         return throwTypeError(ctx, "uniformMatrix4fv requires Float32Array");
+    };
+    log.debug("uniformMatrix4fv: location={d} count={d}", .{ loc, count });
+    webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
+        return c.JS_UNDEFINED;
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_uniformMatrix3fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 3) return throwTypeError(ctx, "uniformMatrix3fv requires (location, transpose, data)");
+    const loc = (readUniformLocation(ctx, argv[0]) catch return c.JS_EXCEPTION) orelse return c.JS_UNDEFINED;
+    const prog = webgl_draw.currentProgram() orelse return throwTypeError(ctx, "no program in use");
+    var transpose: c_int = 0;
+    if (c.JS_ToInt32(ctx, &transpose, argv[1]) != 0) return c.JS_EXCEPTION;
+    if (transpose != 0) return throwTypeError(ctx, "uniformMatrix3fv transpose must be false");
+    var temp: [MaxUniformFloatCount]f32 = undefined;
+    const count = readFloatValues(ctx, argv[2], temp[0..]) catch {
+        return throwTypeError(ctx, "uniformMatrix3fv requires Float32Array");
+    };
+    webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
+        return c.JS_UNDEFINED;
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_uniformMatrix2fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 3) return throwTypeError(ctx, "uniformMatrix2fv requires (location, transpose, data)");
+    const loc = (readUniformLocation(ctx, argv[0]) catch return c.JS_EXCEPTION) orelse return c.JS_UNDEFINED;
+    const prog = webgl_draw.currentProgram() orelse return throwTypeError(ctx, "no program in use");
+    var transpose: c_int = 0;
+    if (c.JS_ToInt32(ctx, &transpose, argv[1]) != 0) return c.JS_EXCEPTION;
+    if (transpose != 0) return throwTypeError(ctx, "uniformMatrix2fv transpose must be false");
+    var temp: [MaxUniformFloatCount]f32 = undefined;
+    const count = readFloatValues(ctx, argv[2], temp[0..]) catch {
+        return throwTypeError(ctx, "uniformMatrix2fv requires Float32Array");
+    };
+    webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
+        return c.JS_UNDEFINED;
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_uniform1fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return throwTypeError(ctx, "uniform1fv requires (location, data)");
+    const loc = (readUniformLocation(ctx, argv[0]) catch return c.JS_EXCEPTION) orelse return c.JS_UNDEFINED;
+    const prog = webgl_draw.currentProgram() orelse return throwTypeError(ctx, "no program in use");
+    var temp: [MaxUniformFloatCount]f32 = undefined;
+    const count = readFloatValues(ctx, argv[1], temp[0..]) catch {
+        return throwTypeError(ctx, "uniform1fv requires Float32Array");
+    };
+    webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
+        return c.JS_UNDEFINED;
+    };
+    return c.JS_UNDEFINED;
+}
+
+export fn js_gl_uniform2fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return throwTypeError(ctx, "uniform2fv requires (location, data)");
+    const loc = (readUniformLocation(ctx, argv[0]) catch return c.JS_EXCEPTION) orelse return c.JS_UNDEFINED;
+    const prog = webgl_draw.currentProgram() orelse return throwTypeError(ctx, "no program in use");
+    var temp: [MaxUniformFloatCount]f32 = undefined;
+    const count = readFloatValues(ctx, argv[1], temp[0..]) catch {
+        return throwTypeError(ctx, "uniform2fv requires Float32Array");
     };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
         return c.JS_UNDEFINED;
@@ -2941,4 +3027,58 @@ test "JS gl program link status reflects shader state" {
     try testing.expectEqual(@as(i32, 0), log0);
     try testing.expectEqual(@as(i32, 0), linked1);
     try testing.expect(log1 > 0);
+}
+
+test "JS gl uniform setters work with linked program" {
+    const shaders = webgl_shader.globalShaderTable();
+    shaders.reset();
+    defer shaders.reset();
+    const programs = webgl_program.globalProgramTable();
+    programs.reset();
+    defer programs.reset();
+    webgl_draw.reset();
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 128 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    // Test uniform setters with a valid program
+    try rt.eval(
+        \\var vs = gl.createShader(gl.VERTEX_SHADER);
+        \\var fs = gl.createShader(gl.FRAGMENT_SHADER);
+        \\gl.shaderSource(vs, "uniform mat4 u_mvp; uniform mat3 u_normal; uniform mat2 u_tex; uniform vec4 u_color; uniform vec3 u_pos; uniform vec2 u_scale; uniform float u_time; void main() { gl_Position = vec4(0.0); }");
+        \\gl.shaderSource(fs, "void main() { gl_FragColor = vec4(1.0); }");
+        \\gl.compileShader(vs);
+        \\gl.compileShader(fs);
+        \\var p = gl.createProgram();
+        \\gl.attachShader(p, vs);
+        \\gl.attachShader(p, fs);
+        \\gl.linkProgram(p);
+        \\gl.useProgram(p);
+        \\var loc_mvp = gl.getUniformLocation(p, "u_mvp");
+        \\var loc_normal = gl.getUniformLocation(p, "u_normal");
+        \\var loc_tex = gl.getUniformLocation(p, "u_tex");
+        \\var loc_color = gl.getUniformLocation(p, "u_color");
+        \\var loc_pos = gl.getUniformLocation(p, "u_pos");
+        \\var loc_scale = gl.getUniformLocation(p, "u_scale");
+        \\var loc_time = gl.getUniformLocation(p, "u_time");
+        \\var ok_loc = (loc_mvp !== null && loc_normal !== null && loc_color !== null && loc_time !== null) ? 1 : 0;
+        \\gl.uniformMatrix4fv(loc_mvp, false, new Float32Array(16));
+        \\gl.uniformMatrix3fv(loc_normal, false, new Float32Array(9));
+        \\gl.uniformMatrix2fv(loc_tex, false, new Float32Array(4));
+        \\gl.uniform4fv(loc_color, new Float32Array([1.0, 0.5, 0.0, 1.0]));
+        \\gl.uniform3fv(loc_pos, new Float32Array([1.0, 2.0, 3.0]));
+        \\gl.uniform2fv(loc_scale, new Float32Array([1.0, 1.0]));
+        \\gl.uniform1fv(loc_time, new Float32Array([0.5]));
+        \\gl.uniform4f(loc_color, 1.0, 0.5, 0.0, 1.0);
+        \\gl.uniform3f(loc_pos, 1.0, 2.0, 3.0);
+        \\gl.uniform2f(loc_scale, 1.0, 1.0);
+        \\gl.uniform1f(loc_time, 0.5);
+        \\var ok_uniform = 1;
+    , "test");
+
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_loc", "test"));
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_uniform", "test"));
 }

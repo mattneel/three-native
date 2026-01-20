@@ -107,5 +107,9 @@ JSValue js_gl_uniform2i(JSContext *ctx, JSValue *this_val, int argc, JSValue *ar
 JSValue js_gl_uniform3i(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_uniform4i(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_uniformMatrix4fv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_gl_uniformMatrix3fv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_gl_uniformMatrix2fv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_gl_uniform1fv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_gl_uniform2fv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_uniform3fv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_uniform4fv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);

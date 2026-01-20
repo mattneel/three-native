@@ -8,6 +8,59 @@ const shader = @import("webgl_shader.zig");
 const sokol = @import("sokol");
 const sg = sokol.gfx;
 
+/// Internal uniform type enum that extends Sokol's UniformType with MAT2/MAT3 support.
+/// Sokol only has MAT4; we handle MAT2/MAT3 by mapping them to FLOAT4 arrays in shader descriptors.
+pub const UniformType = enum(u8) {
+    INVALID = 0,
+    FLOAT = 1,
+    FLOAT2 = 2,
+    FLOAT3 = 3,
+    FLOAT4 = 4,
+    INT = 5,
+    INT2 = 6,
+    INT3 = 7,
+    INT4 = 8,
+    MAT2 = 9,
+    MAT3 = 10,
+    MAT4 = 11,
+
+    /// Convert to Sokol UniformType. MAT2/MAT3 map to FLOAT4 (used with array_count).
+    pub fn toSokol(self: UniformType) sg.UniformType {
+        return switch (self) {
+            .INVALID => .INVALID,
+            .FLOAT => .FLOAT,
+            .FLOAT2 => .FLOAT2,
+            .FLOAT3 => .FLOAT3,
+            .FLOAT4 => .FLOAT4,
+            .INT => .INT,
+            .INT2 => .INT2,
+            .INT3 => .INT3,
+            .INT4 => .INT4,
+            .MAT2 => .FLOAT4, // 2 columns of vec4 in std140
+            .MAT3 => .FLOAT4, // 3 columns of vec4 in std140
+            .MAT4 => .MAT4,
+        };
+    }
+
+    /// Get the effective array count for Sokol. MAT2 becomes FLOAT4[2], MAT3 becomes FLOAT4[3].
+    pub fn sokolArrayCount(self: UniformType, array_count: u16) u16 {
+        const base: u16 = if (array_count == 0) 1 else array_count;
+        return switch (self) {
+            .MAT2 => base * 2,
+            .MAT3 => base * 3,
+            else => base,
+        };
+    }
+
+    /// Check if this is a matrix type
+    pub fn isMatrix(self: UniformType) bool {
+        return switch (self) {
+            .MAT2, .MAT3, .MAT4 => true,
+            else => false,
+        };
+    }
+};
+
 pub const MaxPrograms: usize = 64;
 pub const MaxProgramInfoLogBytes: usize = 4 * 1024;
 pub const MaxProgramAttrs: usize = 16;
@@ -27,7 +80,7 @@ pub const ProgramId = packed struct(u32) {
 const UniformEntry = struct {
     name_len: u8,
     name_bytes: [MaxUniformNameBytes]u8,
-    utype: sg.UniformType,
+    utype: UniformType,
     array_count: u16,
     offset: u32,
     stride: u32,
@@ -541,17 +594,17 @@ pub const ProgramTable = struct {
     }
 
     pub fn setUniformFloats(self: *Self, id: ProgramId, loc: u32, values: []const f32) !void {
-        const entry = self.get(id) orelse return error.InvalidHandle;
+        const prog = self.get(id) orelse return error.InvalidHandle;
         const info = decodeUniformLocation(loc);
         if (info.kind != .block) return error.InvalidLocation;
-        const block = if (info.stage == .vertex) &entry.vs_uniforms else &entry.fs_uniforms;
+        const block = if (info.stage == .vertex) &prog.vs_uniforms else &prog.fs_uniforms;
         if (info.index >= block.count) return error.InvalidLocation;
         const uniform = block.items[@as(usize, info.index)];
         if (block.size == 0) return error.NoUniformBuffer;
         const size = @as(usize, block.size);
         try writeUniformFloats(uniform, block.buffer[0..size], values);
         const name = uniform.name_bytes[0..@as(usize, uniform.name_len)];
-        const other_block = if (info.stage == .vertex) &entry.fs_uniforms else &entry.vs_uniforms;
+        const other_block = if (info.stage == .vertex) &prog.fs_uniforms else &prog.vs_uniforms;
         if (findUniform(other_block, name)) |other_idx| {
             if (other_block.size == 0) return error.NoUniformBuffer;
             const other_uniform = other_block.items[@as(usize, other_idx)];
@@ -787,12 +840,16 @@ pub const ProgramTable = struct {
 
     fn storeUniforms(self: *Self, entry: *Entry, stage: UniformStage, decls: []UniformDecl, block_size: u32) !void {
         _ = self;
+        _ = block_size; // Recompute instead of using passed-in size
         const block = if (stage == .vertex) &entry.program.vs_uniforms else &entry.program.fs_uniforms;
         block.* = emptyUniformBlock();
         if (decls.len == 0) return;
         if (decls.len > MaxProgramUniforms) return error.TooManyUniforms;
-        if (block_size > MaxUniformBlockBytes) return error.UniformBlockTooLarge;
         block.count = @intCast(decls.len);
+
+        // Recompute offsets for this stage's uniforms starting from 0
+        // (the decl.offset values may have been computed across all stages combined)
+        var offset: u32 = 0;
         for (decls, 0..) |decl, idx| {
             if (decl.name.len >= MaxUniformNameBytes) return error.UniformNameTooLong;
             @memcpy(block.items[idx].name_bytes[0..decl.name.len], decl.name);
@@ -800,9 +857,15 @@ pub const ProgramTable = struct {
             block.items[idx].name_len = @intCast(decl.name.len);
             block.items[idx].utype = decl.utype;
             block.items[idx].array_count = decl.array_count;
-            block.items[idx].offset = decl.offset;
             block.items[idx].stride = decl.stride;
             block.items[idx].size = decl.size;
+
+            // Compute offset for this stage starting from 0
+            const elem_count: u32 = if (decl.array_count == 0) 1 else decl.array_count;
+            const alignment = uniformAlign(decl.utype, decl.array_count);
+            offset = alignUp(offset, alignment);
+            block.items[idx].offset = offset;
+            offset += decl.stride * elem_count;
         }
         const computed_size = computeUniformBlockSize(block);
         if (computed_size > MaxUniformBlockBytes) return error.UniformBlockTooLarge;
@@ -856,15 +919,18 @@ fn applyUniformBlock(desc: *sg.ShaderDesc, index: usize, stage: sg.ShaderStage, 
     desc.uniform_blocks[index].stage = stage;
     desc.uniform_blocks[index].size = block.size;
     desc.uniform_blocks[index].layout = .STD140;
-    // Use a separate output index to ensure contiguous glsl_uniforms array
+    // IMPORTANT: Use pointer to items to avoid getting dangling pointers to copies
     var out_idx: usize = 0;
-    for (block.items, 0..) |item, idx| {
-        if (idx >= @as(usize, block.count)) break;
+    const item_count = @as(usize, block.count);
+    for (0..item_count) |idx| {
+        const item = &block.items[idx];
         if (item.name_len == 0) continue;
         const count: u16 = if (item.array_count == 0) 1 else item.array_count;
+        // Convert our internal UniformType to Sokol's type
+        // MAT2/MAT3 map to FLOAT4 with adjusted array_count
         desc.uniform_blocks[index].glsl_uniforms[out_idx] = .{
-            .type = item.utype,
-            .array_count = count,
+            .type = item.utype.toSokol(),
+            .array_count = item.utype.sokolArrayCount(count),
             .glsl_name = item.name_bytes[0..].ptr,
         };
         out_idx += 1;
@@ -929,20 +995,22 @@ fn findSampler(prog: *const Program, name: []const u8) ?u8 {
     return null;
 }
 
-fn uniformComponents(utype: sg.UniformType) u32 {
+fn uniformComponents(utype: UniformType) u32 {
     return switch (utype) {
         .FLOAT, .INT => 1,
         .FLOAT2, .INT2 => 2,
         .FLOAT3, .INT3 => 3,
         .FLOAT4, .INT4 => 4,
-        .MAT4 => 16,
-        else => 0,
+        .MAT2 => 4, // 2x2 matrix = 4 floats
+        .MAT3 => 9, // 3x3 matrix = 9 floats
+        .MAT4 => 16, // 4x4 matrix = 16 floats
+        .INVALID => 0,
     };
 }
 
 fn writeUniformFloats(uniform: UniformEntry, buffer: []u8, values: []const f32) !void {
     switch (uniform.utype) {
-        .FLOAT, .FLOAT2, .FLOAT3, .FLOAT4, .MAT4 => {},
+        .FLOAT, .FLOAT2, .FLOAT3, .FLOAT4, .MAT2, .MAT3, .MAT4 => {},
         else => return error.InvalidType,
     }
     const comps = uniformComponents(uniform.utype);
@@ -951,13 +1019,52 @@ fn writeUniformFloats(uniform: UniformEntry, buffer: []u8, values: []const f32) 
     const needed = elem_count * comps;
     if (values.len < needed) return error.NotEnoughData;
     if (uniform.stride == 0) return error.InvalidStride;
-    for (0..elem_count) |idx| {
-        const src = values[idx * comps .. idx * comps + comps];
-        const dst_off = uniform.offset + uniform.stride * @as(u32, @intCast(idx));
-        if (dst_off + uniform.stride > buffer.len) return error.OutOfBounds;
-        const dst = buffer[dst_off .. dst_off + uniform.stride];
-        @memset(dst, 0);
-        @memcpy(dst[0..uniform.size], std.mem.sliceAsBytes(src));
+
+    // Handle mat2/mat3 specially - they need column padding for std140
+    switch (uniform.utype) {
+        .MAT2 => {
+            // mat2: 4 floats input -> 8 floats output (2 columns * 4 floats each)
+            // Each column (2 floats) is padded to vec4 (4 floats)
+            for (0..elem_count) |idx| {
+                const src = values[idx * 4 .. idx * 4 + 4];
+                const dst_off = uniform.offset + uniform.stride * @as(u32, @intCast(idx));
+                if (dst_off + uniform.stride > buffer.len) return error.OutOfBounds;
+                const dst = buffer[dst_off .. dst_off + uniform.stride];
+                @memset(dst, 0);
+                // Column 0: src[0..2] -> dst[0..8] (first 2 floats, rest zero)
+                @memcpy(dst[0..8], std.mem.sliceAsBytes(src[0..2]));
+                // Column 1: src[2..4] -> dst[16..24] (first 2 floats, rest zero)
+                @memcpy(dst[16..24], std.mem.sliceAsBytes(src[2..4]));
+            }
+        },
+        .MAT3 => {
+            // mat3: 9 floats input -> 12 floats output (3 columns * 4 floats each)
+            // Each column (3 floats) is padded to vec4 (4 floats)
+            for (0..elem_count) |idx| {
+                const src = values[idx * 9 .. idx * 9 + 9];
+                const dst_off = uniform.offset + uniform.stride * @as(u32, @intCast(idx));
+                if (dst_off + uniform.stride > buffer.len) return error.OutOfBounds;
+                const dst = buffer[dst_off .. dst_off + uniform.stride];
+                @memset(dst, 0);
+                // Column 0: src[0..3] -> dst[0..12]
+                @memcpy(dst[0..12], std.mem.sliceAsBytes(src[0..3]));
+                // Column 1: src[3..6] -> dst[16..28]
+                @memcpy(dst[16..28], std.mem.sliceAsBytes(src[3..6]));
+                // Column 2: src[6..9] -> dst[32..44]
+                @memcpy(dst[32..44], std.mem.sliceAsBytes(src[6..9]));
+            }
+        },
+        else => {
+            // Standard float types and mat4 - no special padding needed
+            for (0..elem_count) |idx| {
+                const src = values[idx * comps .. idx * comps + comps];
+                const dst_off = uniform.offset + uniform.stride * @as(u32, @intCast(idx));
+                if (dst_off + uniform.stride > buffer.len) return error.OutOfBounds;
+                const dst = buffer[dst_off .. dst_off + uniform.stride];
+                @memset(dst, 0);
+                @memcpy(dst[0..uniform.size], std.mem.sliceAsBytes(src));
+            }
+        },
     }
 }
 
@@ -998,7 +1105,7 @@ const UniformStage = enum(u8) { vertex = 0, fragment = 1 };
 
 const UniformDecl = struct {
     name: []const u8,
-    utype: sg.UniformType,
+    utype: UniformType,
     array_count: u16,
     offset: u32,
     stride: u32,
@@ -1099,7 +1206,12 @@ fn translateEsToGl330(
     var header_buf: [MaxTranslatedShaderBytes]u8 = undefined;
     var header_len: usize = 0;
     try appendBytes(header_buf[0..], &header_len, "#version 330\n");
-    const needs_frag_color = stage == .fragment and std.mem.indexOf(u8, source, "gl_FragColor") != null;
+    // Only add fragColor output if the shader uses gl_FragColor AND doesn't already
+    // have its own output declaration (Three.js shaders declare pc_fragColor)
+    const has_gl_frag_color = std.mem.indexOf(u8, source, "gl_FragColor") != null;
+    const has_own_output = std.mem.indexOf(u8, source, "pc_fragColor") != null or
+        std.mem.indexOf(u8, source, "layout(location") != null;
+    const needs_frag_color = stage == .fragment and has_gl_frag_color and !has_own_output;
     if (needs_frag_color) {
         try appendBytes(header_buf[0..], &header_len, "out vec4 fragColor;\n");
     }
@@ -1318,7 +1430,7 @@ fn isPrecision(token: []const u8) bool {
     return std.mem.eql(u8, token, "lowp") or std.mem.eql(u8, token, "mediump") or std.mem.eql(u8, token, "highp");
 }
 
-fn uniformTypeFromGlsl(token: []const u8) ?sg.UniformType {
+fn uniformTypeFromGlsl(token: []const u8) ?UniformType {
     if (std.mem.eql(u8, token, "float")) return .FLOAT;
     if (std.mem.eql(u8, token, "vec2")) return .FLOAT2;
     if (std.mem.eql(u8, token, "vec3")) return .FLOAT3;
@@ -1327,6 +1439,8 @@ fn uniformTypeFromGlsl(token: []const u8) ?sg.UniformType {
     if (std.mem.eql(u8, token, "ivec2")) return .INT2;
     if (std.mem.eql(u8, token, "ivec3")) return .INT3;
     if (std.mem.eql(u8, token, "ivec4")) return .INT4;
+    if (std.mem.eql(u8, token, "mat2")) return .MAT2;
+    if (std.mem.eql(u8, token, "mat3")) return .MAT3;
     if (std.mem.eql(u8, token, "mat4")) return .MAT4;
     return null;
 }
@@ -1337,7 +1451,7 @@ fn samplerKindFromGlsl(token: []const u8) ?SamplerKind {
     return null;
 }
 
-fn glslType(utype: sg.UniformType) []const u8 {
+fn glslType(utype: UniformType) []const u8 {
     return switch (utype) {
         .FLOAT => "float",
         .FLOAT2 => "vec2",
@@ -1347,8 +1461,10 @@ fn glslType(utype: sg.UniformType) []const u8 {
         .INT2 => "ivec2",
         .INT3 => "ivec3",
         .INT4 => "ivec4",
+        .MAT2 => "mat2",
+        .MAT3 => "mat3",
         .MAT4 => "mat4",
-        else => "float",
+        .INVALID => "float",
     };
 }
 
@@ -1365,7 +1481,11 @@ fn layoutUniforms(uniforms: []UniformDecl) !u32 {
         const elem_count: u32 = if (u.array_count == 0) 1 else u.array_count;
         if (elem_count > MaxUniformArrayCount) return error.UniformArrayTooLarge;
         if (u.array_count > 1) {
-            if (u.utype != .FLOAT4 and u.utype != .INT4 and u.utype != .MAT4) {
+            // In std140, arrays of smaller types are padded to vec4 alignment
+            // Only allow types that are vec4-sized or matrix types for arrays
+            if (u.utype != .FLOAT4 and u.utype != .INT4 and
+                u.utype != .MAT2 and u.utype != .MAT3 and u.utype != .MAT4)
+            {
                 return error.UnsupportedArrayType;
             }
         }
@@ -1392,37 +1512,42 @@ fn computeUniformBlockSize(block: *const UniformBlock) u32 {
     return alignUp(offset, 16);
 }
 
-fn uniformMemberSize(utype: sg.UniformType, array_count: u16) u32 {
+fn uniformMemberSize(utype: UniformType, array_count: u16) u32 {
     if (array_count <= 1) return uniformSize(utype);
     return switch (utype) {
         .FLOAT, .FLOAT2, .FLOAT3, .FLOAT4, .INT, .INT2, .INT3, .INT4 => 16 * @as(u32, array_count),
-        .MAT4 => 64 * @as(u32, array_count),
-        else => 0,
+        .MAT2 => 32 * @as(u32, array_count), // 2 vec4 columns per matrix
+        .MAT3 => 48 * @as(u32, array_count), // 3 vec4 columns per matrix
+        .MAT4 => 64 * @as(u32, array_count), // 4 vec4 columns per matrix
+        .INVALID => 0,
     };
 }
 
-fn uniformAlign(utype: sg.UniformType, array_count: u16) u32 {
+fn uniformAlign(utype: UniformType, array_count: u16) u32 {
     if (array_count > 1) return 16;
     return switch (utype) {
         .FLOAT, .INT => 4,
         .FLOAT2, .INT2 => 8,
-        .FLOAT3, .FLOAT4, .INT3, .INT4, .MAT4 => 16,
-        else => 4,
+        // mat2/mat3/mat4 all have vec4-aligned columns in std140
+        .FLOAT3, .FLOAT4, .INT3, .INT4, .MAT2, .MAT3, .MAT4 => 16,
+        .INVALID => 4,
     };
 }
 
-fn uniformSize(utype: sg.UniformType) u32 {
+fn uniformSize(utype: UniformType) u32 {
     return switch (utype) {
         .FLOAT, .INT => 4,
         .FLOAT2, .INT2 => 8,
         .FLOAT3, .INT3 => 12,
         .FLOAT4, .INT4 => 16,
-        .MAT4 => 64,
-        else => 0,
+        .MAT2 => 32, // 2 columns * 16 bytes (vec4-padded)
+        .MAT3 => 48, // 3 columns * 16 bytes (vec4-padded)
+        .MAT4 => 64, // 4 columns * 16 bytes
+        .INVALID => 0,
     };
 }
 
-fn uniformStride(utype: sg.UniformType, array_count: u16) u32 {
+fn uniformStride(utype: UniformType, array_count: u16) u32 {
     const size = uniformSize(utype);
     const alignment = uniformAlign(utype, array_count);
     if (array_count > 1) {
@@ -1678,4 +1803,97 @@ test "ProgramTable tracks sampler uniforms" {
     const fs_len: usize = @intCast(prog.fragment_source_len);
     const fs_src = prog.fragment_source[0..fs_len];
     try testing.expect(std.mem.indexOf(u8, fs_src, "uniform sampler2D u_tex") != null);
+}
+
+test "ProgramTable mat2 and mat3 uniforms" {
+    const shaders = shader.globalShaderTable();
+    shaders.reset();
+    defer shaders.reset();
+    const programs = globalProgramTable();
+    programs.reset();
+    defer programs.reset();
+
+    // Vertex shader with mat2 uniform
+    const vs = try shaders.alloc(.vertex);
+    try shaders.setSource(vs,
+        \\uniform mat2 u_mat2;
+        \\uniform mat3 u_mat3;
+        \\attribute vec3 position;
+        \\void main() {
+        \\  vec2 t = u_mat2 * position.xy;
+        \\  vec3 n = u_mat3 * position;
+        \\  gl_Position = vec4(t, n.z, 1.0);
+        \\}
+    );
+    try shaders.compile(vs);
+
+    const fs = try shaders.alloc(.fragment);
+    try shaders.setSource(fs,
+        \\void main() {
+        \\  gl_FragColor = vec4(1.0);
+        \\}
+    );
+    try shaders.compile(fs);
+
+    const pid = try programs.alloc();
+    try programs.attachShader(pid, vs, shaders);
+    try programs.attachShader(pid, fs, shaders);
+    try programs.link(pid, shaders);
+
+    // Test mat2 uniform location and data
+    const loc_mat2 = try programs.getUniformLocation(pid, "u_mat2");
+    try testing.expect(loc_mat2 >= 0);
+
+    // mat2 input: 4 floats (column-major) [m00, m10, m01, m11]
+    const mat2_data: [4]f32 = .{ 1.0, 2.0, 3.0, 4.0 };
+    try programs.setUniformFloats(pid, @intCast(loc_mat2), mat2_data[0..]);
+
+    const prog = programs.get(pid) orelse return error.UnexpectedNull;
+
+    // Helper to read a f32 from buffer at byte offset
+    const readF32 = struct {
+        fn read(buf: []const u8, offset: usize) f32 {
+            const bytes = buf[offset..][0..4];
+            return @bitCast(bytes.*);
+        }
+    }.read;
+
+    // In std140, mat2 is 32 bytes: 2 columns of vec4 (16 bytes each)
+    // Column 0: [1.0, 2.0, 0.0, 0.0] at offset 0
+    // Column 1: [3.0, 4.0, 0.0, 0.0] at offset 16
+    const mat2_buf = prog.vs_uniforms.buffer[0..];
+    try testing.expectEqual(@as(f32, 1.0), readF32(mat2_buf, 0)); // m00
+    try testing.expectEqual(@as(f32, 2.0), readF32(mat2_buf, 4)); // m10
+    try testing.expectEqual(@as(f32, 0.0), readF32(mat2_buf, 8)); // padding
+    try testing.expectEqual(@as(f32, 0.0), readF32(mat2_buf, 12)); // padding
+    try testing.expectEqual(@as(f32, 3.0), readF32(mat2_buf, 16)); // m01
+    try testing.expectEqual(@as(f32, 4.0), readF32(mat2_buf, 20)); // m11
+    try testing.expectEqual(@as(f32, 0.0), readF32(mat2_buf, 24)); // padding
+    try testing.expectEqual(@as(f32, 0.0), readF32(mat2_buf, 28)); // padding
+
+    // Test mat3 uniform location and data
+    const loc_mat3 = try programs.getUniformLocation(pid, "u_mat3");
+    try testing.expect(loc_mat3 >= 0);
+
+    // mat3 input: 9 floats (column-major)
+    const mat3_data: [9]f32 = .{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 };
+    try programs.setUniformFloats(pid, @intCast(loc_mat3), mat3_data[0..]);
+
+    // In std140, mat3 is 48 bytes: 3 columns of vec4 (16 bytes each)
+    // Column 0: [1.0, 2.0, 3.0, 0.0] at offset 32 (after mat2)
+    // Column 1: [4.0, 5.0, 6.0, 0.0] at offset 48
+    // Column 2: [7.0, 8.0, 9.0, 0.0] at offset 64
+    const mat3_buf = prog.vs_uniforms.buffer[32..];
+    try testing.expectEqual(@as(f32, 1.0), readF32(mat3_buf, 0)); // m00
+    try testing.expectEqual(@as(f32, 2.0), readF32(mat3_buf, 4)); // m10
+    try testing.expectEqual(@as(f32, 3.0), readF32(mat3_buf, 8)); // m20
+    try testing.expectEqual(@as(f32, 0.0), readF32(mat3_buf, 12)); // padding
+    try testing.expectEqual(@as(f32, 4.0), readF32(mat3_buf, 16)); // m01
+    try testing.expectEqual(@as(f32, 5.0), readF32(mat3_buf, 20)); // m11
+    try testing.expectEqual(@as(f32, 6.0), readF32(mat3_buf, 24)); // m21
+    try testing.expectEqual(@as(f32, 0.0), readF32(mat3_buf, 28)); // padding
+    try testing.expectEqual(@as(f32, 7.0), readF32(mat3_buf, 32)); // m02
+    try testing.expectEqual(@as(f32, 8.0), readF32(mat3_buf, 36)); // m12
+    try testing.expectEqual(@as(f32, 9.0), readF32(mat3_buf, 40)); // m22
+    try testing.expectEqual(@as(f32, 0.0), readF32(mat3_buf, 44)); // padding
 }
