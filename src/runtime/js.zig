@@ -4,7 +4,9 @@
 //! are implemented in Zig and provided through the stdlib table.
 
 const std = @import("std");
-const sg = @import("sokol").gfx;
+const sokol = @import("sokol");
+const sg = sokol.gfx;
+const sapp = sokol.app;
 const webgl_state = @import("../shim/webgl_state.zig");
 const webgl = @import("../shim/webgl.zig");
 const webgl_shader = @import("../shim/webgl_shader.zig");
@@ -857,8 +859,9 @@ fn createElementForTag(ctx: *c.JSContext, tag: []const u8) c.JSValue {
     _ = c.JS_SetPropertyStr(ctx, elem, "removeEventListener", noop2);
 
     if (std.mem.eql(u8, tag, "canvas")) {
-        _ = c.JS_SetPropertyStr(ctx, elem, "width", c.JS_NewInt32(ctx, 800));
-        _ = c.JS_SetPropertyStr(ctx, elem, "height", c.JS_NewInt32(ctx, 600));
+        // Use actual framebuffer dimensions to handle high-DPI displays correctly
+        _ = c.JS_SetPropertyStr(ctx, elem, "width", c.JS_NewInt32(ctx, sapp.width()));
+        _ = c.JS_SetPropertyStr(ctx, elem, "height", c.JS_NewInt32(ctx, sapp.height()));
         const get_ctx = c.JS_GetPropertyStr(ctx, global, "__dom_getContext");
         _ = c.JS_SetPropertyStr(ctx, elem, "getContext", get_ctx);
     }
