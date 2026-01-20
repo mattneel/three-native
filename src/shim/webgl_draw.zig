@@ -10,6 +10,7 @@ const sapp = sokol.app;
 const webgl = @import("webgl.zig");
 const webgl_state = @import("webgl_state.zig");
 const webgl_program = @import("webgl_program.zig");
+const webgl_texture = @import("webgl_texture.zig");
 
 // Scoped logger for draw queue debug tracing
 const log = std.log.scoped(.webgl_draw);
@@ -126,6 +127,8 @@ const DrawCommand = struct {
     stencil_fail_back: u32,
     stencil_zfail_back: u32,
     stencil_zpass_back: u32,
+    // Texture bindings (captured at draw time)
+    bound_textures_2d: [webgl_texture.MaxTextureUnits]?webgl_texture.TextureId,
 };
 
 const DrawState = struct {
@@ -446,6 +449,10 @@ pub fn drawArrays(mode: u32, first: i32, count: i32) !void {
     if (count <= 0) return;
     const program = g_state.current_program orelse return error.NoProgram;
     if (g_state.command_count >= MaxDrawCommands) return error.CommandQueueFull;
+
+    // Capture current texture bindings
+    const tex_mgr = webgl_texture.globalTextureManager();
+
     g_state.commands[g_state.command_count] = .{
         .kind = .arrays,
         .mode = mode,
@@ -491,6 +498,7 @@ pub fn drawArrays(mode: u32, first: i32, count: i32) !void {
         .stencil_fail_back = g_state.stencil_fail_back,
         .stencil_zfail_back = g_state.stencil_zfail_back,
         .stencil_zpass_back = g_state.stencil_zpass_back,
+        .bound_textures_2d = tex_mgr.state.bound_2d,
     };
     g_state.command_count += 1;
 }
@@ -499,6 +507,10 @@ pub fn drawElements(mode: u32, count: i32, index_type: u32, offset: u32, element
     if (count <= 0) return;
     const program = g_state.current_program orelse return error.NoProgram;
     if (g_state.command_count >= MaxDrawCommands) return error.CommandQueueFull;
+
+    // Capture current texture bindings
+    const tex_mgr = webgl_texture.globalTextureManager();
+
     g_state.commands[g_state.command_count] = .{
         .kind = .elements,
         .mode = mode,
@@ -544,6 +556,7 @@ pub fn drawElements(mode: u32, count: i32, index_type: u32, offset: u32, element
         .stencil_fail_back = g_state.stencil_fail_back,
         .stencil_zfail_back = g_state.stencil_zfail_back,
         .stencil_zpass_back = g_state.stencil_zpass_back,
+        .bound_textures_2d = tex_mgr.state.bound_2d,
     };
     g_state.command_count += 1;
 }
@@ -749,6 +762,21 @@ pub fn flush() void {
             } else {
                 continue;
             }
+        }
+
+        // Bind textures from captured state
+        // Note: Texture views will be populated when T3 (Image Loading) creates backend resources
+        const tex_mgr = webgl_texture.globalTextureManager();
+        for (cmd.bound_textures_2d, 0..) |maybe_tex_id, unit| {
+            if (maybe_tex_id) |tex_id| {
+                if (tex_mgr.textures.get(tex_id)) |tex| {
+                    // Bind texture view if valid (T3 will populate backend_view)
+                    if (tex.backend_view.id != 0) {
+                        bindings.views[unit] = tex.backend_view;
+                    }
+                }
+            }
+            // For null/invalid handles, bindings.views[unit] remains default (empty)
         }
 
         const key = pipelineKey(prog.backend_shader.id, &pip_desc);

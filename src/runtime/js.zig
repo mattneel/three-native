@@ -12,6 +12,7 @@ const webgl = @import("../shim/webgl.zig");
 const webgl_shader = @import("../shim/webgl_shader.zig");
 const webgl_program = @import("../shim/webgl_program.zig");
 const webgl_draw = @import("../shim/webgl_draw.zig");
+const webgl_texture = @import("../shim/webgl_texture.zig");
 
 const c = @cImport({
     @cInclude("mquickjs_bindings.h");
@@ -255,8 +256,6 @@ const GlState = struct {
 };
 
 var g_gl_state: GlState = .{};
-var g_texture_live: [MaxTextures]bool = [_]bool{false} ** MaxTextures;
-var g_next_texture_id: u32 = 1;
 var g_framebuffer_live: [MaxFramebuffers]bool = [_]bool{false} ** MaxFramebuffers;
 var g_next_framebuffer_id: u32 = 1;
 var g_bound_framebuffer: u32 = 0;
@@ -977,31 +976,6 @@ fn applyStencilFaceU8(face: u32, front: *u8, back: *u8, value: u8) void {
     }
 }
 
-fn allocTextureId() ?u32 {
-    var idx: usize = @intCast((g_next_texture_id - 1) % MaxTextures);
-    var tried: usize = 0;
-    while (tried < MaxTextures) : (tried += 1) {
-        if (!g_texture_live[idx]) {
-            g_texture_live[idx] = true;
-            g_next_texture_id = @intCast(idx + 2);
-            return @intCast(idx + 1);
-        }
-        idx = (idx + 1) % MaxTextures;
-    }
-    return null;
-}
-
-fn isTextureId(id: u32) bool {
-    if (id == 0 or id > MaxTextures) return false;
-    return g_texture_live[id - 1];
-}
-
-fn freeTextureId(id: u32) bool {
-    if (!isTextureId(id)) return false;
-    g_texture_live[id - 1] = false;
-    return true;
-}
-
 fn allocFramebufferId() ?u32 {
     var idx: usize = @intCast((g_next_framebuffer_id - 1) % MaxFramebuffers);
     var tried: usize = 0;
@@ -1292,26 +1266,32 @@ export fn js_gl_activeTexture(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, arg
     if (c.JS_ToUint32(ctx, &unit, argv[0]) != 0) return c.JS_EXCEPTION;
     if (unit < GL_TEXTURE0) return c.JS_UNDEFINED;
     const idx = unit - GL_TEXTURE0;
-    if (idx >= MaxTextureUnits) return c.JS_UNDEFINED;
+    const mgr = webgl_texture.globalTextureManager();
+    mgr.activeTexture(idx) catch return c.JS_UNDEFINED;
     g_gl_state.active_texture_unit = idx;
     return c.JS_UNDEFINED;
 }
 
 export fn js_gl_createTexture(ctx: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
-    const id = allocTextureId() orelse return c.JS_NULL;
-    return c.JS_NewUint32(ctx, id);
+    const mgr = webgl_texture.globalTextureManager();
+    const id = mgr.createTexture() catch return c.JS_NULL;
+    return c.JS_NewUint32(ctx, id.toU32());
 }
 
 export fn js_gl_deleteTexture(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
     if (argc < 1) return c.JS_UNDEFINED;
     var raw: u32 = 0;
     if (c.JS_ToUint32(ctx, &raw, argv[0]) != 0) return c.JS_EXCEPTION;
-    if (freeTextureId(raw)) {
-        for (&g_gl_state.bound_textures_2d) |*slot| {
-            if (slot.* == raw) slot.* = 0;
+    if (raw == 0) return c.JS_UNDEFINED;
+    const mgr = webgl_texture.globalTextureManager();
+    const id = webgl_texture.TextureId.fromU32(raw);
+    if (mgr.deleteTexture(id)) {
+        // Clear legacy bound-texture state for compatibility
+        for (&g_gl_state.bound_textures_2d) |*bound| {
+            if (bound.* == raw) bound.* = 0;
         }
-        for (&g_gl_state.bound_textures_cube) |*slot| {
-            if (slot.* == raw) slot.* = 0;
+        for (&g_gl_state.bound_textures_cube) |*bound| {
+            if (bound.* == raw) bound.* = 0;
         }
     }
     return c.JS_UNDEFINED;
@@ -1322,12 +1302,25 @@ export fn js_gl_bindTexture(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv:
     var target: u32 = 0;
     if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
     var raw: u32 = 0;
-    if (argv[1] != c.JS_NULL and argv[1] != c.JS_UNDEFINED) {
+    if (c.JS_IsNull(argv[1]) == 0 and c.JS_IsUndefined(argv[1]) == 0) {
         if (c.JS_ToUint32(ctx, &raw, argv[1]) != 0) return c.JS_EXCEPTION;
     }
-    if (raw != 0 and !isTextureId(raw)) {
-        return throwTypeError(ctx, "invalid texture handle");
-    }
+
+    const mgr = webgl_texture.globalTextureManager();
+    const tex_target: webgl_texture.TextureTarget = switch (target) {
+        GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_3D => .texture_2d,
+        GL_TEXTURE_CUBE_MAP => .texture_cube_map,
+        else => return c.JS_UNDEFINED,
+    };
+
+    const tex_id: ?webgl_texture.TextureId = if (raw == 0) null else webgl_texture.TextureId.fromU32(raw);
+    mgr.bindTexture(tex_target, tex_id) catch |err| {
+        return switch (err) {
+            error.InvalidHandle => throwTypeError(ctx, "invalid texture handle"),
+        };
+    };
+
+    // Keep g_gl_state in sync for compatibility
     const unit = g_gl_state.active_texture_unit;
     switch (target) {
         GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_3D => g_gl_state.bound_textures_2d[unit] = raw,
@@ -1337,11 +1330,95 @@ export fn js_gl_bindTexture(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv:
     return c.JS_UNDEFINED;
 }
 
-export fn js_gl_texParameteri(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+export fn js_gl_texParameteri(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 3) return c.JS_UNDEFINED;
+    var target: u32 = 0;
+    var pname: u32 = 0;
+    var param: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToUint32(ctx, &pname, argv[1]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToUint32(ctx, &param, argv[2]) != 0) return c.JS_EXCEPTION;
+
+    const mgr = webgl_texture.globalTextureManager();
+    const tex_target: webgl_texture.TextureTarget = switch (target) {
+        GL_TEXTURE_2D => .texture_2d,
+        GL_TEXTURE_CUBE_MAP => .texture_cube_map,
+        else => return c.JS_UNDEFINED,
+    };
+    mgr.texParameteri(tex_target, pname, param) catch |err| {
+        return switch (err) {
+            error.InvalidEnum => throwTypeError(ctx, "invalid texture parameter enum value"),
+            error.NoTextureBound, error.InvalidHandle => c.JS_UNDEFINED,
+        };
+    };
     return c.JS_UNDEFINED;
 }
 
-export fn js_gl_texImage2D(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+export fn js_gl_texImage2D(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    // texImage2D has two signatures:
+    // texImage2D(target, level, internalformat, width, height, border, format, type, pixels)
+    // texImage2D(target, level, internalformat, format, type, source) - for Image/Canvas
+    if (argc < 6) return c.JS_UNDEFINED;
+
+    var target: u32 = 0;
+    var level: i32 = 0;
+    var internal_format: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToInt32(ctx, &level, argv[1]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToUint32(ctx, &internal_format, argv[2]) != 0) return c.JS_EXCEPTION;
+
+    // Only support level 0 for now (no mipmaps)
+    if (level != 0) return c.JS_UNDEFINED;
+
+    const mgr = webgl_texture.globalTextureManager();
+    const tex_target: webgl_texture.TextureTarget = switch (target) {
+        GL_TEXTURE_2D => .texture_2d,
+        else => return c.JS_UNDEFINED,
+    };
+
+    // Check if this is the 9-argument form (with width/height)
+    if (argc >= 9) {
+        var width: u32 = 0;
+        var height: u32 = 0;
+        var border: i32 = 0;
+        var format: u32 = 0;
+        var pixel_type: u32 = 0;
+        if (c.JS_ToUint32(ctx, &width, argv[3]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &height, argv[4]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToInt32(ctx, &border, argv[5]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &format, argv[6]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &pixel_type, argv[7]) != 0) return c.JS_EXCEPTION;
+
+        const tex_format: webgl_texture.TextureFormat = switch (format) {
+            0x1908 => .rgba,
+            0x1907 => .rgb,
+            0x190A => .luminance_alpha,
+            0x1909 => .luminance,
+            0x1906 => .alpha,
+            else => .rgba,
+        };
+
+        // Get pixel data from typed array or null
+        var pixels: ?[]const u8 = null;
+        if (c.JS_IsNull(argv[8]) == 0 and c.JS_IsUndefined(argv[8]) == 0) {
+            var c_ptr: [*c]u8 = null;
+            var len: usize = 0;
+            // Try typed array first (Uint8Array, etc.)
+            if (c.JS_GetTypedArrayData(ctx, argv[8], &c_ptr, &len) == 0 and c_ptr != null and len > 0) {
+                pixels = @as([*]const u8, @ptrCast(c_ptr))[0..len];
+            } else if (c.JS_GetArrayBufferData(ctx, argv[8], &c_ptr, &len) == 0 and c_ptr != null and len > 0) {
+                // Try ArrayBuffer
+                pixels = @as([*]const u8, @ptrCast(c_ptr))[0..len];
+            }
+        }
+
+        mgr.texImage2D(tex_target, width, height, tex_format, internal_format, pixel_type, pixels) catch {};
+    } else {
+        // 6-argument form: texImage2D(target, level, internalformat, format, type, source)
+        // This form is used for Image/Canvas sources which are not yet supported
+        return throwTypeError(ctx, "texImage2D with Image/Canvas source not yet supported");
+    }
+
     return c.JS_UNDEFINED;
 }
 
