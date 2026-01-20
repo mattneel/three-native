@@ -6,6 +6,7 @@ const std = @import("std");
 const testing = std.testing;
 const sokol = @import("sokol");
 const sg = sokol.gfx;
+const sapp = sokol.app;
 const webgl = @import("webgl.zig");
 const webgl_state = @import("webgl_state.zig");
 const webgl_program = @import("webgl_program.zig");
@@ -626,10 +627,14 @@ pub fn flush() void {
             continue;
         };
 
+        // Scale viewport and scissor by DPI factor for high-DPI displays
+        const dpi_scale = sapp.dpiScale();
         const vp = sanitizeRect(cmd.viewport);
-        sg.applyViewport(vp[0], vp[1], vp[2], vp[3], false);
+        const vp_scaled = scaleRect(vp, dpi_scale);
+        sg.applyViewport(vp_scaled[0], vp_scaled[1], vp_scaled[2], vp_scaled[3], false);
         const scissor = if (cmd.scissor_enabled) sanitizeRect(cmd.scissor) else vp;
-        sg.applyScissorRect(scissor[0], scissor[1], scissor[2], scissor[3], false);
+        const scissor_scaled = scaleRect(scissor, dpi_scale);
+        sg.applyScissorRect(scissor_scaled[0], scissor_scaled[1], scissor_scaled[2], scissor_scaled[3], false);
 
         var pip_desc = sg.PipelineDesc{};
         pip_desc.shader = prog.backend_shader;
@@ -878,6 +883,15 @@ fn sanitizeRect(rect: [4]i32) [4]i32 {
     if (out[2] < 0) out[2] = 0;
     if (out[3] < 0) out[3] = 0;
     return out;
+}
+
+fn scaleRect(rect: [4]i32, scale: f32) [4]i32 {
+    return .{
+        @intFromFloat(@as(f32, @floatFromInt(rect[0])) * scale),
+        @intFromFloat(@as(f32, @floatFromInt(rect[1])) * scale),
+        @intFromFloat(@as(f32, @floatFromInt(rect[2])) * scale),
+        @intFromFloat(@as(f32, @floatFromInt(rect[3])) * scale),
+    };
 }
 
 fn clampStencilU8(value: i32) u8 {

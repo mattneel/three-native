@@ -331,6 +331,9 @@ fn createDomStubs(ctx: *c.JSContext) !void {
     const window_obj = c.JS_NewObject(ctx);
     _ = c.JS_SetPropertyStr(ctx, window_obj, "document", document);
     _ = c.JS_SetPropertyStr(ctx, window_obj, "devicePixelRatio", c.JS_NewInt32(ctx, 1));
+    // Expose actual framebuffer dimensions for high-DPI support
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "innerWidth", c.JS_NewInt32(ctx, sapp.width()));
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "innerHeight", c.JS_NewInt32(ctx, sapp.height()));
     const noop_evt = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
     _ = c.JS_SetPropertyStr(ctx, window_obj, "addEventListener", noop_evt);
     const noop_evt2 = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
