@@ -75,6 +75,65 @@ pub const Program = struct {
     sampler_count: u8,
     samplers: [MaxProgramSamplers]SamplerEntry,
     link_version: u32,
+
+    /// Count the union of VS and FS uniforms (no duplicates).
+    pub fn countUniformUnion(self: *const Program) u32 {
+        var count: u32 = self.vs_uniforms.count;
+        // Add FS uniforms that are not in VS
+        const fs_count: usize = @intCast(self.fs_uniforms.count);
+        for (self.fs_uniforms.items[0..fs_count]) |fs_item| {
+            if (fs_item.name_len == 0) continue;
+            const fs_name = fs_item.name_bytes[0..@as(usize, fs_item.name_len)];
+            var found_in_vs = false;
+            const vs_count: usize = @intCast(self.vs_uniforms.count);
+            for (self.vs_uniforms.items[0..vs_count]) |vs_item| {
+                if (vs_item.name_len == 0) continue;
+                const vs_name = vs_item.name_bytes[0..@as(usize, vs_item.name_len)];
+                if (std.mem.eql(u8, fs_name, vs_name)) {
+                    found_in_vs = true;
+                    break;
+                }
+            }
+            if (!found_in_vs) count += 1;
+        }
+        return count;
+    }
+
+    /// Get uniform at union index. Returns null if out of range.
+    /// Union order: all VS uniforms first, then FS uniforms not in VS.
+    pub fn getUniformAtUnionIndex(self: *const Program, index: u32) ?*const UniformEntry {
+        const vs_count: u32 = self.vs_uniforms.count;
+        if (index < vs_count) {
+            const item = &self.vs_uniforms.items[@as(usize, index)];
+            if (item.name_len == 0) return null;
+            return item;
+        }
+        // Find the (index - vs_count)th FS uniform that's not in VS
+        var fs_only_idx: u32 = 0;
+        const target_fs_only_idx: u32 = index - vs_count;
+        const fs_count: usize = @intCast(self.fs_uniforms.count);
+        for (self.fs_uniforms.items[0..fs_count]) |*fs_item| {
+            if (fs_item.name_len == 0) continue;
+            const fs_name = fs_item.name_bytes[0..@as(usize, fs_item.name_len)];
+            var found_in_vs = false;
+            const vs_count_usize: usize = @intCast(self.vs_uniforms.count);
+            for (self.vs_uniforms.items[0..vs_count_usize]) |vs_item| {
+                if (vs_item.name_len == 0) continue;
+                const vs_name = vs_item.name_bytes[0..@as(usize, vs_item.name_len)];
+                if (std.mem.eql(u8, fs_name, vs_name)) {
+                    found_in_vs = true;
+                    break;
+                }
+            }
+            if (!found_in_vs) {
+                if (fs_only_idx == target_fs_only_idx) {
+                    return fs_item;
+                }
+                fs_only_idx += 1;
+            }
+        }
+        return null;
+    }
 };
 
 fn emptyUniformBlock() UniformBlock {
@@ -275,6 +334,7 @@ pub const ProgramTable = struct {
             &vs_sampler_count_pass1,
             &vs_block_size_pass1,
             null,
+            null,
         ) catch {
             try self.setInfoLog(entry, "vertex shader translate failed");
             return;
@@ -296,6 +356,7 @@ pub const ProgramTable = struct {
             &fs_samplers_pass1,
             &fs_sampler_count_pass1,
             &fs_block_size_pass1,
+            null,
             null,
         ) catch {
             try self.setInfoLog(entry, "fragment shader translate failed");
@@ -330,6 +391,8 @@ pub const ProgramTable = struct {
         var vs_samplers: [MaxProgramSamplers]SamplerDecl = undefined;
         var vs_sampler_count: u8 = 0;
         var vs_block_size: u32 = 0;
+        // Only emit uniforms that were in VS original source (pass1)
+        const vs_emit_filter: ?[]const UniformDecl = if (vs_uniform_count_pass1 > 0) vs_uniforms_pass1[0..vs_count_pass1] else null;
         translateEsToGl330(
             vs_source,
             .vertex,
@@ -341,6 +404,7 @@ pub const ProgramTable = struct {
             &vs_sampler_count,
             &vs_block_size,
             override_uniforms,
+            vs_emit_filter,
         ) catch {
             try self.setInfoLog(entry, "vertex shader translate failed");
             return;
@@ -352,6 +416,8 @@ pub const ProgramTable = struct {
         var fs_samplers: [MaxProgramSamplers]SamplerDecl = undefined;
         var fs_sampler_count: u8 = 0;
         var fs_block_size: u32 = 0;
+        // Only emit uniforms that were in FS original source (pass1)
+        const fs_emit_filter: ?[]const UniformDecl = if (fs_uniform_count_pass1 > 0) fs_uniforms_pass1[0..fs_count_pass1] else null;
         translateEsToGl330(
             fs_source,
             .fragment,
@@ -363,19 +429,43 @@ pub const ProgramTable = struct {
             &fs_sampler_count,
             &fs_block_size,
             override_uniforms,
+            fs_emit_filter,
         ) catch {
             try self.setInfoLog(entry, "fragment shader translate failed");
             return;
         };
         entry.program.fragment_source_len = fs_len;
 
+        // Store only the uniforms that were in each stage's original source
+        // AND are actually used in the shader body (not just declared).
+        var vs_filtered: [MaxProgramUniforms]UniformDecl = undefined;
+        var vs_filtered_count: usize = 0;
         const vs_count: usize = @intCast(vs_uniform_count);
-        self.storeUniforms(entry, .vertex, vs_uniforms[0..vs_count], vs_block_size) catch {
+        for (vs_uniforms[0..vs_count]) |u| {
+            if (hasUniformName(vs_uniforms_pass1[0..vs_count_pass1], u.name) and
+                isUniformUsedInShader(vs_source, u.name))
+            {
+                vs_filtered[vs_filtered_count] = u;
+                vs_filtered_count += 1;
+            }
+        }
+        self.storeUniforms(entry, .vertex, vs_filtered[0..vs_filtered_count], vs_block_size) catch {
             try self.setInfoLog(entry, "vertex uniforms rejected");
             return;
         };
+
+        var fs_filtered: [MaxProgramUniforms]UniformDecl = undefined;
+        var fs_filtered_count: usize = 0;
         const fs_count: usize = @intCast(fs_uniform_count);
-        self.storeUniforms(entry, .fragment, fs_uniforms[0..fs_count], fs_block_size) catch {
+        for (fs_uniforms[0..fs_count]) |u| {
+            if (hasUniformName(fs_uniforms_pass1[0..fs_count_pass1], u.name) and
+                isUniformUsedInShader(fs_source, u.name))
+            {
+                fs_filtered[fs_filtered_count] = u;
+                fs_filtered_count += 1;
+            }
+        }
+        self.storeUniforms(entry, .fragment, fs_filtered[0..fs_filtered_count], fs_block_size) catch {
             try self.setInfoLog(entry, "fragment uniforms rejected");
             return;
         };
@@ -601,10 +691,81 @@ pub const ProgramTable = struct {
         entry.program.attr_name_lens = [_]u8{0} ** MaxProgramAttrs;
         entry.program.attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs;
         entry.program.attr_count = 0;
+
+        // Simple preprocessor state to handle #ifdef/#ifndef/#else/#endif
+        const MaxDefines: usize = 32;
+        const MaxIfdefDepth: usize = 16;
+        var defines: [MaxDefines][MaxAttrNameBytes]u8 = undefined;
+        var define_lens: [MaxDefines]u8 = [_]u8{0} ** MaxDefines;
+        var define_count: usize = 0;
+        var ifdef_stack: [MaxIfdefDepth]bool = undefined; // true = active section
+        var ifdef_depth: usize = 0;
+
         var it = std.mem.splitScalar(u8, source, '\n');
         while (it.next()) |line| {
             const trimmed = std.mem.trimLeft(u8, line, " \t\r");
             if (std.mem.startsWith(u8, trimmed, "#version")) continue;
+
+            // Handle preprocessor directives
+            if (std.mem.startsWith(u8, trimmed, "#define ")) {
+                if (ifdef_depth == 0 or ifdef_stack[ifdef_depth - 1]) {
+                    const rest = trimmed["#define ".len..];
+                    var tokens = std.mem.tokenizeAny(u8, rest, " \t\r\n");
+                    if (tokens.next()) |def_name| {
+                        if (define_count < MaxDefines and def_name.len < MaxAttrNameBytes) {
+                            @memcpy(defines[define_count][0..def_name.len], def_name);
+                            define_lens[define_count] = @intCast(def_name.len);
+                            define_count += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, trimmed, "#ifdef ")) {
+                const rest = trimmed["#ifdef ".len..];
+                var tokens = std.mem.tokenizeAny(u8, rest, " \t\r\n");
+                const def_name = tokens.next() orelse "";
+                const defined = isDefined(defines[0..define_count], define_lens[0..define_count], def_name);
+                const parent_active = ifdef_depth == 0 or ifdef_stack[ifdef_depth - 1];
+                if (ifdef_depth < MaxIfdefDepth) {
+                    ifdef_stack[ifdef_depth] = parent_active and defined;
+                    ifdef_depth += 1;
+                }
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, trimmed, "#ifndef ")) {
+                const rest = trimmed["#ifndef ".len..];
+                var tokens = std.mem.tokenizeAny(u8, rest, " \t\r\n");
+                const def_name = tokens.next() orelse "";
+                const defined = isDefined(defines[0..define_count], define_lens[0..define_count], def_name);
+                const parent_active = ifdef_depth == 0 or ifdef_stack[ifdef_depth - 1];
+                if (ifdef_depth < MaxIfdefDepth) {
+                    ifdef_stack[ifdef_depth] = parent_active and !defined;
+                    ifdef_depth += 1;
+                }
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, trimmed, "#else")) {
+                if (ifdef_depth > 0) {
+                    const parent_active = ifdef_depth <= 1 or ifdef_stack[ifdef_depth - 2];
+                    ifdef_stack[ifdef_depth - 1] = parent_active and !ifdef_stack[ifdef_depth - 1];
+                }
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, trimmed, "#endif")) {
+                if (ifdef_depth > 0) {
+                    ifdef_depth -= 1;
+                }
+                continue;
+            }
+
+            // Skip lines inside inactive preprocessor blocks
+            if (ifdef_depth > 0 and !ifdef_stack[ifdef_depth - 1]) continue;
+
             const decl = extractAttrDecl(trimmed) orelse continue;
             var tokens = std.mem.tokenizeAny(u8, decl, " \t");
             _ = tokens.next() orelse continue; // type
@@ -695,15 +856,18 @@ fn applyUniformBlock(desc: *sg.ShaderDesc, index: usize, stage: sg.ShaderStage, 
     desc.uniform_blocks[index].stage = stage;
     desc.uniform_blocks[index].size = block.size;
     desc.uniform_blocks[index].layout = .STD140;
+    // Use a separate output index to ensure contiguous glsl_uniforms array
+    var out_idx: usize = 0;
     for (block.items, 0..) |item, idx| {
         if (idx >= @as(usize, block.count)) break;
         if (item.name_len == 0) continue;
         const count: u16 = if (item.array_count == 0) 1 else item.array_count;
-        desc.uniform_blocks[index].glsl_uniforms[idx] = .{
+        desc.uniform_blocks[index].glsl_uniforms[out_idx] = .{
             .type = item.utype,
             .array_count = count,
             .glsl_name = item.name_bytes[0..].ptr,
         };
+        out_idx += 1;
     }
 }
 
@@ -865,6 +1029,7 @@ fn translateEsToGl330(
     sampler_count: *u8,
     block_size: *u32,
     override_uniforms: ?[]const UniformDecl,
+    emit_filter: ?[]const UniformDecl,
 ) !void {
     if (source.len > shader.MaxShaderSourceBytes) return error.TooLarge;
     uniform_count.* = 0;
@@ -939,13 +1104,17 @@ fn translateEsToGl330(
         try appendBytes(header_buf[0..], &header_len, "out vec4 fragColor;\n");
     }
     if (uniform_count.* > 0) {
+        // Emit individual uniform declarations instead of a uniform block.
+        // Sokol's GL backend uses glGetUniformLocation for each uniform,
+        // which doesn't work with GLSL uniform blocks.
+        // Only emit uniforms that pass the filter AND are actually used.
         const count: usize = @intCast(uniform_count.*);
-        const block_name = if (override_uniforms != null) "params" else if (stage == .vertex) "vs_params" else "fs_params";
-        try appendBytes(header_buf[0..], &header_len, "layout(std140) uniform ");
-        try appendBytes(header_buf[0..], &header_len, block_name);
-        try appendBytes(header_buf[0..], &header_len, " {\n");
         for (uniforms[0..count]) |u| {
-            try appendBytes(header_buf[0..], &header_len, "  ");
+            if (emit_filter) |filter| {
+                if (!hasUniformName(filter, u.name)) continue;
+                if (!isUniformUsedInShader(source, u.name)) continue;
+            }
+            try appendBytes(header_buf[0..], &header_len, "uniform ");
             try appendBytes(header_buf[0..], &header_len, glslType(u.utype));
             try appendBytes(header_buf[0..], &header_len, " ");
             try appendBytes(header_buf[0..], &header_len, u.name);
@@ -956,7 +1125,6 @@ fn translateEsToGl330(
             }
             try appendBytes(header_buf[0..], &header_len, ";\n");
         }
-        try appendBytes(header_buf[0..], &header_len, "};\n");
     }
 
     if (sampler_count.* > 0) {
@@ -1034,6 +1202,106 @@ fn hasUniformName(uniforms: []const UniformDecl, name: []const u8) bool {
     for (uniforms) |u| {
         if (u.name.len == 0) continue;
         if (std.mem.eql(u8, u.name, name)) return true;
+    }
+    return false;
+}
+
+/// Check if a uniform name is actually used in the shader body (not just declared).
+/// Uses preprocessor-aware scanning to skip code inside false #ifdef/#ifndef blocks.
+fn isUniformUsedInShader(source: []const u8, name: []const u8) bool {
+    if (name.len == 0) return false;
+
+    // Simple preprocessor state
+    const MaxDefines: usize = 32;
+    const MaxIfdefDepth: usize = 16;
+    var defines: [MaxDefines][MaxAttrNameBytes]u8 = undefined;
+    var define_lens: [MaxDefines]u8 = [_]u8{0} ** MaxDefines;
+    var define_count: usize = 0;
+    var ifdef_stack: [MaxIfdefDepth]bool = undefined;
+    var ifdef_depth: usize = 0;
+
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+
+        // Handle preprocessor directives
+        if (std.mem.startsWith(u8, trimmed, "#define ")) {
+            if (ifdef_depth == 0 or ifdef_stack[ifdef_depth - 1]) {
+                const rest = trimmed["#define ".len..];
+                var tokens = std.mem.tokenizeAny(u8, rest, " \t\r\n");
+                if (tokens.next()) |def_name| {
+                    if (define_count < MaxDefines and def_name.len < MaxAttrNameBytes) {
+                        @memcpy(defines[define_count][0..def_name.len], def_name);
+                        define_lens[define_count] = @intCast(def_name.len);
+                        define_count += 1;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "#ifdef ")) {
+            const rest = trimmed["#ifdef ".len..];
+            var tokens = std.mem.tokenizeAny(u8, rest, " \t\r\n");
+            const def_name = tokens.next() orelse "";
+            const defined = isDefined(defines[0..define_count], define_lens[0..define_count], def_name);
+            const parent_active = ifdef_depth == 0 or ifdef_stack[ifdef_depth - 1];
+            if (ifdef_depth < MaxIfdefDepth) {
+                ifdef_stack[ifdef_depth] = parent_active and defined;
+                ifdef_depth += 1;
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "#ifndef ")) {
+            const rest = trimmed["#ifndef ".len..];
+            var tokens = std.mem.tokenizeAny(u8, rest, " \t\r\n");
+            const def_name = tokens.next() orelse "";
+            const defined = isDefined(defines[0..define_count], define_lens[0..define_count], def_name);
+            const parent_active = ifdef_depth == 0 or ifdef_stack[ifdef_depth - 1];
+            if (ifdef_depth < MaxIfdefDepth) {
+                ifdef_stack[ifdef_depth] = parent_active and !defined;
+                ifdef_depth += 1;
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "#else")) {
+            if (ifdef_depth > 0) {
+                const parent_active = ifdef_depth <= 1 or ifdef_stack[ifdef_depth - 2];
+                ifdef_stack[ifdef_depth - 1] = parent_active and !ifdef_stack[ifdef_depth - 1];
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "#endif")) {
+            if (ifdef_depth > 0) {
+                ifdef_depth -= 1;
+            }
+            continue;
+        }
+
+        // Skip if inside an inactive preprocessor block
+        if (ifdef_depth > 0 and !ifdef_stack[ifdef_depth - 1]) continue;
+
+        // Skip uniform declarations and other preprocessor directives
+        if (std.mem.startsWith(u8, trimmed, "uniform ")) continue;
+        if (std.mem.startsWith(u8, trimmed, "#")) continue;
+        if (std.mem.startsWith(u8, trimmed, "precision ")) continue;
+
+        // Search for the name as a word in this line
+        var pos: usize = 0;
+        while (pos < line.len) {
+            if (std.mem.indexOfPos(u8, line, pos, name)) |idx| {
+                const start_ok = idx == 0 or !isWordChar(line[idx - 1]);
+                const end_idx = idx + name.len;
+                const end_ok = end_idx >= line.len or !isWordChar(line[end_idx]);
+                if (start_ok and end_ok) return true;
+                pos = idx + 1;
+            } else {
+                break;
+            }
+        }
     }
     return false;
 }
@@ -1166,6 +1434,15 @@ fn uniformStride(utype: sg.UniformType, array_count: u16) u32 {
 fn alignUp(value: u32, alignment: u32) u32 {
     if (alignment == 0) return value;
     return (value + alignment - 1) & ~(alignment - 1);
+}
+
+fn isDefined(defines: [][MaxAttrNameBytes]u8, define_lens: []u8, name: []const u8) bool {
+    for (defines, 0..) |def, idx| {
+        const len = define_lens[idx];
+        if (len == 0) continue;
+        if (std.mem.eql(u8, def[0..len], name)) return true;
+    }
+    return false;
 }
 
 fn extractAttrDecl(line: []const u8) ?[]const u8 {

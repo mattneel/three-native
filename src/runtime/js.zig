@@ -2022,8 +2022,8 @@ export fn js_gl_getProgramParameter(ctx: *c.JSContext, _: *c.JSValue, argc: c_in
         GL_VALIDATE_STATUS => return c.JS_TRUE,
         GL_ACTIVE_ATTRIBUTES => return c.JS_NewUint32(ctx, prog.attr_count),
         GL_ACTIVE_UNIFORMS => {
-            const block_count: u32 = if (prog.vs_uniforms.count >= prog.fs_uniforms.count) prog.vs_uniforms.count else prog.fs_uniforms.count;
-            const total: u32 = block_count + prog.sampler_count;
+            const uniform_count: u32 = prog.countUniformUnion();
+            const total: u32 = uniform_count + prog.sampler_count;
             return c.JS_NewUint32(ctx, total);
         },
         GL_ATTACHED_SHADERS => {
@@ -2142,16 +2142,16 @@ export fn js_gl_getActiveUniform(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, 
     const prog = programs.get(programIdFromU32(raw)) orelse {
         return throwTypeError(ctx, "invalid program handle");
     };
-    const block_count: usize = @intCast(if (prog.vs_uniforms.count >= prog.fs_uniforms.count) prog.vs_uniforms.count else prog.fs_uniforms.count);
-    const sampler_count: usize = @intCast(prog.sampler_count);
-    const total: usize = block_count + sampler_count;
+    const uniform_count: u32 = prog.countUniformUnion();
+    const sampler_count: u32 = prog.sampler_count;
+    const total: u32 = uniform_count + sampler_count;
     if (index >= total) return c.JS_NULL;
     var name_buf: [webgl_program.MaxUniformNameBytes + 3]u8 = undefined;
     var name_len: usize = 0;
     var size: u32 = 1;
     var utype: u32 = GL_FLOAT;
-    if (index < block_count) {
-        const u = prog.vs_uniforms.items[@as(usize, @intCast(index))];
+    if (index < uniform_count) {
+        const u = prog.getUniformAtUnionIndex(index) orelse return c.JS_NULL;
         name_len = @intCast(u.name_len);
         if (name_len == 0) return c.JS_NULL;
         @memcpy(name_buf[0..name_len], u.name_bytes[0..name_len]);
@@ -2164,7 +2164,8 @@ export fn js_gl_getActiveUniform(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, 
         }
         utype = uniformTypeToGlEnum(u.utype);
     } else {
-        const s_idx: usize = @intCast(index - block_count);
+        const s_idx: usize = @intCast(index - uniform_count);
+        if (s_idx >= sampler_count) return c.JS_NULL;
         const s = prog.samplers[s_idx];
         name_len = @intCast(s.name_len);
         if (name_len == 0) return c.JS_NULL;

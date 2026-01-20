@@ -75,6 +75,25 @@ Notes:
 
 Early stage. Milestones are tracked in `KICKSTART.md`.
 
+## Known Warnings
+
+When running Three.js examples, you may see Sokol warnings like:
+
+```
+GL_UNIFORMBLOCK_NAME_NOT_FOUND_IN_SHADER: uniform block name not found in shader
+GL_VERTEX_ATTRIBUTE_NOT_FOUND_IN_SHADER: vertex attribute not found in shader
+```
+
+**These are benign.** They occur because:
+
+1. Three.js shaders declare many standard uniforms/attributes for optional features
+2. The GLSL compiler optimizes out unused ones
+3. Sokol logs a warning when `glGetUniformLocation`/`glGetAttribLocation` returns -1
+
+The runtime uses preprocessor-aware filtering to minimize these, but the GLSL
+compiler's dead code elimination is more aggressive than our heuristics. Unused
+uniforms simply won't be applied, which is correct behavior.
+
 ## Docs
 
 - Design docs (GitHub Pages): https://mattneel.github.io/three-native/docs/design/
