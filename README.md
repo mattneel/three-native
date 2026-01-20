@@ -110,6 +110,9 @@ If you want to help:
 
 Issues and ideas are welcome.
 
+If this saved you from having to wrangle Electron, please consider sponsoring.
+Every little bit helps.
+
 ## License
 
 MIT
