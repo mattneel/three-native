@@ -10,6 +10,7 @@ pub const renderer = @import("platform/renderer.zig");
 
 // Runtime modules
 pub const js = @import("runtime/js.zig");
+pub const events = @import("runtime/events.zig");
 
 // Shim modules
 pub const globals = @import("shim/globals.zig");

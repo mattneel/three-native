@@ -14,6 +14,8 @@ JSValue js_setClearColor(JSContext *ctx, JSValue *this_val, int argc, JSValue *a
 JSValue js_requestAnimationFrame(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_cancelAnimationFrame(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_dom_noop(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_addEventListener(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_removeEventListener(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_dom_createElement(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_dom_createElementNS(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_dom_getContext(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);

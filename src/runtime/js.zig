@@ -14,6 +14,7 @@ const webgl_program = @import("../shim/webgl_program.zig");
 const webgl_draw = @import("../shim/webgl_draw.zig");
 const webgl_texture = @import("../shim/webgl_texture.zig");
 const image_loader = @import("../shim/image_loader.zig");
+const events = @import("events.zig");
 
 const c = @cImport({
     @cInclude("mquickjs_bindings.h");
@@ -84,6 +85,8 @@ pub const Runtime = struct {
         if (g_runtime == self) {
             g_runtime = null;
         }
+        // Clean up event system before freeing context (needs valid context for JS_DeleteGCRef)
+        deinitEventSystem();
         // Clean up native images to avoid memory leaks
         for (&g_native_images) |*img| {
             if (img.active) {
@@ -235,6 +238,237 @@ const NativeImage = struct {
 var g_native_images: [MaxNativeImages]NativeImage = [_]NativeImage{.{}} ** MaxNativeImages;
 var g_next_native_image_id: u32 = 1;
 
+// =============================================================================
+// Event Listener Storage
+// =============================================================================
+
+const MaxEventListeners: usize = 64;
+
+const EventListener = struct {
+    event_type: events.EventType = .mousedown,
+    callback: c.JSGCRef = .{},
+    active: bool = false,
+};
+
+var g_event_listeners: [MaxEventListeners]EventListener = [_]EventListener{.{}} ** MaxEventListeners;
+var g_event_ctx: ?*c.JSContext = null;
+
+/// Initialize the event system with a JS context
+pub fn initEventSystem(ctx: *c.JSContext) void {
+    g_event_ctx = ctx;
+    // Clear all listeners
+    for (&g_event_listeners) |*listener| {
+        listener.active = false;
+    }
+    log.debug("Event system initialized", .{});
+}
+
+/// Deinitialize the event system
+pub fn deinitEventSystem() void {
+    if (g_event_ctx) |ctx| {
+        // Free all listener callbacks
+        for (&g_event_listeners) |*listener| {
+            if (listener.active) {
+                c.JS_DeleteGCRef(ctx, &listener.callback);
+                listener.active = false;
+            }
+        }
+    }
+    g_event_ctx = null;
+}
+
+/// Add an event listener (called from js_addEventListener)
+fn addEventListenerInternal(event_type: events.EventType, callback: c.JSValue) bool {
+    const ctx = g_event_ctx orelse return false;
+
+    // Find a free slot
+    for (&g_event_listeners) |*listener| {
+        if (!listener.active) {
+            listener.event_type = event_type;
+            const pfunc = c.JS_AddGCRef(ctx, &listener.callback);
+            pfunc.* = callback;
+            listener.active = true;
+            log.debug("Added listener for {s}", .{event_type.toString()});
+            return true;
+        }
+    }
+    log.warn("No free event listener slots", .{});
+    return false;
+}
+
+/// Remove an event listener (called from js_removeEventListener)
+fn removeEventListenerInternal(event_type: events.EventType, callback: c.JSValue) bool {
+    const ctx = g_event_ctx orelse return false;
+
+    for (&g_event_listeners) |*listener| {
+        if (listener.active and listener.event_type == event_type) {
+            // Compare callbacks (by value equality)
+            if (listener.callback.val == callback) {
+                c.JS_DeleteGCRef(ctx, &listener.callback);
+                listener.active = false;
+                log.debug("Removed listener for {s}", .{event_type.toString()});
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Dispatch a mouse event to all registered listeners
+pub fn dispatchMouseEvent(event_type: events.EventType, data: events.MouseEventData) void {
+    const ctx = g_event_ctx orelse return;
+
+    // Create the event object
+    const event_obj = createMouseEventObject(ctx, event_type, data);
+    if (c.JS_IsException(event_obj) != 0) {
+        log.err("Failed to create mouse event object", .{});
+        return;
+    }
+
+    // Call all matching listeners
+    for (&g_event_listeners) |*listener| {
+        if (listener.active and listener.event_type == event_type) {
+            callEventListener(ctx, listener.callback.val, event_obj);
+        }
+    }
+}
+
+/// Dispatch a keyboard event to all registered listeners
+pub fn dispatchKeyboardEvent(event_type: events.EventType, data: events.KeyboardEventData) void {
+    const ctx = g_event_ctx orelse return;
+
+    // Create the event object
+    const event_obj = createKeyboardEventObject(ctx, event_type, data);
+    if (c.JS_IsException(event_obj) != 0) {
+        log.err("Failed to create keyboard event object", .{});
+        return;
+    }
+
+    // Call all matching listeners
+    for (&g_event_listeners) |*listener| {
+        if (listener.active and listener.event_type == event_type) {
+            callEventListener(ctx, listener.callback.val, event_obj);
+        }
+    }
+}
+
+/// Dispatch a resize event to all registered listeners
+pub fn dispatchResizeEvent(data: events.ResizeEventData) void {
+    const ctx = g_event_ctx orelse return;
+
+    // Create the event object
+    const event_obj = createResizeEventObject(ctx, data);
+    if (c.JS_IsException(event_obj) != 0) {
+        log.err("Failed to create resize event object", .{});
+        return;
+    }
+
+    // Call all matching listeners
+    for (&g_event_listeners) |*listener| {
+        if (listener.active and listener.event_type == .resize) {
+            callEventListener(ctx, listener.callback.val, event_obj);
+        }
+    }
+}
+
+fn callEventListener(ctx: *c.JSContext, callback: c.JSValue, event_obj: c.JSValue) void {
+    // Check stack space
+    if (c.JS_StackCheck(ctx, 3) != 0) {
+        log.err("Stack overflow in event dispatch", .{});
+        return;
+    }
+
+    // Call: callback(event)
+    c.JS_PushArg(ctx, event_obj);
+    c.JS_PushArg(ctx, callback);
+    c.JS_PushArg(ctx, c.JS_NULL);
+    const result = c.JS_Call(ctx, 1);
+    if (c.JS_IsException(result) != 0) {
+        log.err("Exception in event listener callback", .{});
+        const ex = c.JS_GetException(ctx);
+        c.JS_PrintValueF(ctx, ex, c.JS_DUMP_LONG);
+    }
+}
+
+fn createMouseEventObject(ctx: *c.JSContext, event_type: events.EventType, data: events.MouseEventData) c.JSValue {
+    const obj = c.JS_NewObject(ctx);
+    if (c.JS_IsException(obj) != 0) return obj;
+
+    // Set properties
+    _ = c.JS_SetPropertyStr(ctx, obj, "type", c.JS_NewString(ctx, event_type.toString().ptr));
+    _ = c.JS_SetPropertyStr(ctx, obj, "clientX", c.JS_NewInt32(ctx, data.clientX));
+    _ = c.JS_SetPropertyStr(ctx, obj, "clientY", c.JS_NewInt32(ctx, data.clientY));
+    _ = c.JS_SetPropertyStr(ctx, obj, "pageX", c.JS_NewInt32(ctx, data.clientX));
+    _ = c.JS_SetPropertyStr(ctx, obj, "pageY", c.JS_NewInt32(ctx, data.clientY));
+    _ = c.JS_SetPropertyStr(ctx, obj, "screenX", c.JS_NewInt32(ctx, data.clientX));
+    _ = c.JS_SetPropertyStr(ctx, obj, "screenY", c.JS_NewInt32(ctx, data.clientY));
+    _ = c.JS_SetPropertyStr(ctx, obj, "offsetX", c.JS_NewInt32(ctx, data.clientX));
+    _ = c.JS_SetPropertyStr(ctx, obj, "offsetY", c.JS_NewInt32(ctx, data.clientY));
+    _ = c.JS_SetPropertyStr(ctx, obj, "button", c.JS_NewInt32(ctx, data.button));
+    _ = c.JS_SetPropertyStr(ctx, obj, "buttons", c.JS_NewInt32(ctx, data.buttons));
+    _ = c.JS_SetPropertyStr(ctx, obj, "shiftKey", if (data.shiftKey) c.JS_TRUE else c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "ctrlKey", if (data.ctrlKey) c.JS_TRUE else c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "altKey", if (data.altKey) c.JS_TRUE else c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "metaKey", if (data.metaKey) c.JS_TRUE else c.JS_FALSE);
+
+    // Wheel-specific properties
+    if (event_type == .wheel) {
+        _ = c.JS_SetPropertyStr(ctx, obj, "deltaX", c.JS_NewFloat64(ctx, data.deltaX));
+        _ = c.JS_SetPropertyStr(ctx, obj, "deltaY", c.JS_NewFloat64(ctx, data.deltaY));
+        _ = c.JS_SetPropertyStr(ctx, obj, "deltaZ", c.JS_NewFloat64(ctx, 0));
+        _ = c.JS_SetPropertyStr(ctx, obj, "deltaMode", c.JS_NewInt32(ctx, data.deltaMode));
+    }
+
+    // Stub methods
+    const global = c.JS_GetGlobalObject(ctx);
+    const noop = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
+    _ = c.JS_SetPropertyStr(ctx, obj, "preventDefault", noop);
+    _ = c.JS_SetPropertyStr(ctx, obj, "stopPropagation", noop);
+
+    return obj;
+}
+
+fn createKeyboardEventObject(ctx: *c.JSContext, event_type: events.EventType, data: events.KeyboardEventData) c.JSValue {
+    const obj = c.JS_NewObject(ctx);
+    if (c.JS_IsException(obj) != 0) return obj;
+
+    // Set properties
+    _ = c.JS_SetPropertyStr(ctx, obj, "type", c.JS_NewString(ctx, event_type.toString().ptr));
+    _ = c.JS_SetPropertyStr(ctx, obj, "key", c.JS_NewStringLen(ctx, data.key.ptr, data.key.len));
+    _ = c.JS_SetPropertyStr(ctx, obj, "code", c.JS_NewStringLen(ctx, data.code.ptr, data.code.len));
+    _ = c.JS_SetPropertyStr(ctx, obj, "keyCode", c.JS_NewInt32(ctx, @intCast(data.keyCode)));
+    _ = c.JS_SetPropertyStr(ctx, obj, "which", c.JS_NewInt32(ctx, @intCast(data.keyCode)));
+    _ = c.JS_SetPropertyStr(ctx, obj, "shiftKey", if (data.shiftKey) c.JS_TRUE else c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "ctrlKey", if (data.ctrlKey) c.JS_TRUE else c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "altKey", if (data.altKey) c.JS_TRUE else c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "metaKey", if (data.metaKey) c.JS_TRUE else c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, obj, "repeat", if (data.repeat) c.JS_TRUE else c.JS_FALSE);
+
+    // Stub methods
+    const global = c.JS_GetGlobalObject(ctx);
+    const noop = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
+    _ = c.JS_SetPropertyStr(ctx, obj, "preventDefault", noop);
+    _ = c.JS_SetPropertyStr(ctx, obj, "stopPropagation", noop);
+
+    return obj;
+}
+
+fn createResizeEventObject(ctx: *c.JSContext, data: events.ResizeEventData) c.JSValue {
+    const obj = c.JS_NewObject(ctx);
+    if (c.JS_IsException(obj) != 0) return obj;
+
+    // Set properties - resize events include target with innerWidth/innerHeight
+    _ = c.JS_SetPropertyStr(ctx, obj, "type", c.JS_NewString(ctx, "resize"));
+
+    // Create target object with window dimensions
+    const target = c.JS_NewObject(ctx);
+    _ = c.JS_SetPropertyStr(ctx, target, "innerWidth", c.JS_NewInt32(ctx, @intCast(data.width)));
+    _ = c.JS_SetPropertyStr(ctx, target, "innerHeight", c.JS_NewInt32(ctx, @intCast(data.height)));
+    _ = c.JS_SetPropertyStr(ctx, obj, "target", target);
+
+    return obj;
+}
+
 fn allocNativeImage() ?u32 {
     for (g_native_images[0..], 0..) |*entry, i| {
         if (!entry.active) {
@@ -382,22 +616,32 @@ fn createDomStubs(ctx: *c.JSContext) !void {
 
     _ = c.JS_SetPropertyStr(ctx, global, "document", document);
 
+    // Initialize event system
+    initEventSystem(ctx);
+
     const window_obj = c.JS_NewObject(ctx);
     _ = c.JS_SetPropertyStr(ctx, window_obj, "document", document);
     _ = c.JS_SetPropertyStr(ctx, window_obj, "devicePixelRatio", c.JS_NewInt32(ctx, 1));
     // Expose actual framebuffer dimensions for high-DPI support
     _ = c.JS_SetPropertyStr(ctx, window_obj, "innerWidth", c.JS_NewInt32(ctx, sapp.width()));
     _ = c.JS_SetPropertyStr(ctx, window_obj, "innerHeight", c.JS_NewInt32(ctx, sapp.height()));
-    const noop_evt = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
-    _ = c.JS_SetPropertyStr(ctx, window_obj, "addEventListener", noop_evt);
-    const noop_evt2 = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
-    _ = c.JS_SetPropertyStr(ctx, window_obj, "removeEventListener", noop_evt2);
+    // Use real event listener functions
+    const add_listener = c.JS_GetPropertyStr(ctx, global, "__addEventListener");
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "addEventListener", add_listener);
+    const remove_listener = c.JS_GetPropertyStr(ctx, global, "__removeEventListener");
+    _ = c.JS_SetPropertyStr(ctx, window_obj, "removeEventListener", remove_listener);
     const raf = c.JS_GetPropertyStr(ctx, global, "requestAnimationFrame");
     _ = c.JS_SetPropertyStr(ctx, window_obj, "requestAnimationFrame", raf);
     const caf = c.JS_GetPropertyStr(ctx, global, "cancelAnimationFrame");
     _ = c.JS_SetPropertyStr(ctx, window_obj, "cancelAnimationFrame", caf);
     _ = c.JS_SetPropertyStr(ctx, global, "window", window_obj);
     _ = c.JS_SetPropertyStr(ctx, global, "self", window_obj);
+
+    // Also add listeners to document
+    const add_listener2 = c.JS_GetPropertyStr(ctx, global, "__addEventListener");
+    _ = c.JS_SetPropertyStr(ctx, document, "addEventListener", add_listener2);
+    const remove_listener2 = c.JS_GetPropertyStr(ctx, global, "__removeEventListener");
+    _ = c.JS_SetPropertyStr(ctx, document, "removeEventListener", remove_listener2);
 
     // Install img element helper with src getter/setter that triggers image loading
     const img_helper_code =
@@ -955,6 +1199,62 @@ export fn js_dom_noop(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue)
     return c.JS_UNDEFINED;
 }
 
+/// addEventListener(type, callback) - Register an event listener
+export fn js_addEventListener(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+
+    // Get event type string
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[0], &buf);
+    if (c_str == null) return c.JS_UNDEFINED;
+    const event_type_str = @as([*]const u8, @ptrCast(c_str))[0..len];
+
+    // Parse event type
+    const event_type = events.EventType.fromString(event_type_str) orelse {
+        log.debug("addEventListener: unknown event type '{s}'", .{event_type_str});
+        return c.JS_UNDEFINED;
+    };
+
+    // Get callback
+    const callback = argv[1];
+    if (c.JS_IsFunction(ctx, callback) == 0) {
+        return c.JS_UNDEFINED;
+    }
+
+    // Register listener
+    if (addEventListenerInternal(event_type, callback)) {
+        log.debug("addEventListener: registered {s}", .{event_type_str});
+    }
+
+    return c.JS_UNDEFINED;
+}
+
+/// removeEventListener(type, callback) - Remove an event listener
+export fn js_removeEventListener(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return c.JS_UNDEFINED;
+
+    // Get event type string
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[0], &buf);
+    if (c_str == null) return c.JS_UNDEFINED;
+    const event_type_str = @as([*]const u8, @ptrCast(c_str))[0..len];
+
+    // Parse event type
+    const event_type = events.EventType.fromString(event_type_str) orelse {
+        return c.JS_UNDEFINED;
+    };
+
+    // Get callback
+    const callback = argv[1];
+
+    // Remove listener
+    _ = removeEventListenerInternal(event_type, callback);
+
+    return c.JS_UNDEFINED;
+}
+
 fn createElementForTag(ctx: *c.JSContext, tag: []const u8) c.JSValue {
     // For img elements, use the JS helper that sets up src getter/setter
     if (std.mem.eql(u8, tag, "img")) {
@@ -976,10 +1276,11 @@ fn createElementForTag(ctx: *c.JSContext, tag: []const u8) c.JSValue {
     _ = c.JS_SetPropertyStr(ctx, elem, "style", style);
 
     const global = c.JS_GetGlobalObject(ctx);
-    const noop = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
-    _ = c.JS_SetPropertyStr(ctx, elem, "addEventListener", noop);
-    const noop2 = c.JS_GetPropertyStr(ctx, global, "__dom_noop");
-    _ = c.JS_SetPropertyStr(ctx, elem, "removeEventListener", noop2);
+    // Use real event listener functions for interactive elements
+    const add_listener = c.JS_GetPropertyStr(ctx, global, "__addEventListener");
+    _ = c.JS_SetPropertyStr(ctx, elem, "addEventListener", add_listener);
+    const remove_listener = c.JS_GetPropertyStr(ctx, global, "__removeEventListener");
+    _ = c.JS_SetPropertyStr(ctx, elem, "removeEventListener", remove_listener);
 
     if (std.mem.eql(u8, tag, "canvas")) {
         // Use actual framebuffer dimensions to handle high-DPI displays correctly

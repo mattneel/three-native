@@ -646,6 +646,8 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("requestAnimationFrame", 1, js_requestAnimationFrame),
     JS_CFUNC_DEF("cancelAnimationFrame", 1, js_cancelAnimationFrame),
     JS_CFUNC_DEF("__dom_noop", 0, js_dom_noop),
+    JS_CFUNC_DEF("__addEventListener", 2, js_addEventListener),
+    JS_CFUNC_DEF("__removeEventListener", 2, js_removeEventListener),
     JS_CFUNC_DEF("__dom_createElement", 1, js_dom_createElement),
     JS_CFUNC_DEF("__dom_createElementNS", 2, js_dom_createElementNS),
     JS_CFUNC_DEF("__dom_getContext", 1, js_dom_getContext),

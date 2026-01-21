@@ -13,6 +13,8 @@ const TriangleRenderer = @import("renderer.zig").TriangleRenderer;
 const webgl_state = @import("../shim/webgl_state.zig");
 const webgl_backend = @import("../shim/webgl_backend.zig");
 const webgl_draw = @import("../shim/webgl_draw.zig");
+const events = @import("../runtime/events.zig");
+const js = @import("../runtime/js.zig");
 
 /// Window configuration options
 pub const WindowConfig = struct {
@@ -64,6 +66,9 @@ pub const WindowState = enum {
 /// Frame callback type - called each frame with delta time in seconds
 pub const FrameCallback = *const fn (delta_seconds: f64) void;
 
+/// Click detection threshold (in pixels)
+const ClickThreshold: f32 = 5.0;
+
 /// Global window state (sokol uses callbacks, so we need global state)
 var g_state: struct {
     config: WindowConfig = .{},
@@ -75,6 +80,11 @@ var g_state: struct {
     pass_action: sgfx.PassAction = .{},
     triangle_renderer: ?TriangleRenderer = null,
     draw_triangle: bool = false,
+    // Mouse tracking for click detection
+    mouse_down_x: f32 = 0,
+    mouse_down_y: f32 = 0,
+    mouse_down_button: u8 = 0,
+    mouse_is_down: bool = false,
 } = .{};
 
 // =============================================================================
@@ -166,6 +176,22 @@ fn sokolCleanup() callconv(.c) void {
 
 fn sokolEvent(event: [*c]const sapp.Event) callconv(.c) void {
     const ev = event.*;
+
+    // Extract modifier flags
+    const shift = (ev.modifiers & sapp.modifier_shift) != 0;
+    const ctrl = (ev.modifiers & sapp.modifier_ctrl) != 0;
+    const alt = (ev.modifiers & sapp.modifier_alt) != 0;
+    const meta = (ev.modifiers & sapp.modifier_super) != 0;
+
+    // Track mouse button state
+    const lmb = (ev.modifiers & sapp.modifier_lmb) != 0;
+    const rmb = (ev.modifiers & sapp.modifier_rmb) != 0;
+    const mmb = (ev.modifiers & sapp.modifier_mmb) != 0;
+    var buttons: u8 = 0;
+    if (lmb) buttons |= 1;
+    if (rmb) buttons |= 2;
+    if (mmb) buttons |= 4;
+
     switch (ev.type) {
         .QUIT_REQUESTED => {
             g_state.state = .closing;
@@ -175,6 +201,136 @@ fn sokolEvent(event: [*c]const sapp.Event) callconv(.c) void {
             if (ev.key_code == .ESCAPE) {
                 sapp.requestQuit();
             }
+            // Dispatch keydown event
+            const key_code: u32 = @intCast(@intFromEnum(ev.key_code));
+            js.dispatchKeyboardEvent(.keydown, .{
+                .key = events.sokolKeyCodeToKey(key_code, shift),
+                .code = events.sokolKeyCodeToCode(key_code),
+                .keyCode = events.sokolKeyCodeToDom(key_code),
+                .shiftKey = shift,
+                .ctrlKey = ctrl,
+                .altKey = alt,
+                .metaKey = meta,
+                .repeat = ev.key_repeat,
+            });
+        },
+        .KEY_UP => {
+            const key_code: u32 = @intCast(@intFromEnum(ev.key_code));
+            js.dispatchKeyboardEvent(.keyup, .{
+                .key = events.sokolKeyCodeToKey(key_code, shift),
+                .code = events.sokolKeyCodeToCode(key_code),
+                .keyCode = events.sokolKeyCodeToDom(key_code),
+                .shiftKey = shift,
+                .ctrlKey = ctrl,
+                .altKey = alt,
+                .metaKey = meta,
+                .repeat = false,
+            });
+        },
+        .MOUSE_DOWN => {
+            const button: u8 = switch (ev.mouse_button) {
+                .LEFT => 0,
+                .MIDDLE => 1,
+                .RIGHT => 2,
+                else => 0,
+            };
+            // Track mouse down position for click detection
+            g_state.mouse_down_x = ev.mouse_x;
+            g_state.mouse_down_y = ev.mouse_y;
+            g_state.mouse_down_button = button;
+            g_state.mouse_is_down = true;
+
+            js.dispatchMouseEvent(.mousedown, .{
+                .clientX = @intFromFloat(ev.mouse_x),
+                .clientY = @intFromFloat(ev.mouse_y),
+                .button = button,
+                .buttons = buttons,
+                .shiftKey = shift,
+                .ctrlKey = ctrl,
+                .altKey = alt,
+                .metaKey = meta,
+            });
+        },
+        .MOUSE_UP => {
+            const button: u8 = switch (ev.mouse_button) {
+                .LEFT => 0,
+                .MIDDLE => 1,
+                .RIGHT => 2,
+                else => 0,
+            };
+            js.dispatchMouseEvent(.mouseup, .{
+                .clientX = @intFromFloat(ev.mouse_x),
+                .clientY = @intFromFloat(ev.mouse_y),
+                .button = button,
+                .buttons = buttons,
+                .shiftKey = shift,
+                .ctrlKey = ctrl,
+                .altKey = alt,
+                .metaKey = meta,
+            });
+
+            // Synthesize click/contextmenu if mouse didn't move much
+            if (g_state.mouse_is_down and g_state.mouse_down_button == button) {
+                const dx = ev.mouse_x - g_state.mouse_down_x;
+                const dy = ev.mouse_y - g_state.mouse_down_y;
+                const distance = @sqrt(dx * dx + dy * dy);
+
+                if (distance < ClickThreshold) {
+                    const mouse_data = events.MouseEventData{
+                        .clientX = @intFromFloat(ev.mouse_x),
+                        .clientY = @intFromFloat(ev.mouse_y),
+                        .button = button,
+                        .buttons = buttons,
+                        .shiftKey = shift,
+                        .ctrlKey = ctrl,
+                        .altKey = alt,
+                        .metaKey = meta,
+                    };
+
+                    if (button == 2) {
+                        // Right click -> contextmenu
+                        js.dispatchMouseEvent(.contextmenu, mouse_data);
+                    } else {
+                        // Left/middle click -> click
+                        js.dispatchMouseEvent(.click, mouse_data);
+                    }
+                }
+            }
+            g_state.mouse_is_down = false;
+        },
+        .MOUSE_MOVE => {
+            js.dispatchMouseEvent(.mousemove, .{
+                .clientX = @intFromFloat(ev.mouse_x),
+                .clientY = @intFromFloat(ev.mouse_y),
+                .button = 0,
+                .buttons = buttons,
+                .shiftKey = shift,
+                .ctrlKey = ctrl,
+                .altKey = alt,
+                .metaKey = meta,
+            });
+        },
+        .MOUSE_SCROLL => {
+            js.dispatchMouseEvent(.wheel, .{
+                .clientX = @intFromFloat(ev.mouse_x),
+                .clientY = @intFromFloat(ev.mouse_y),
+                .button = 0,
+                .buttons = buttons,
+                .shiftKey = shift,
+                .ctrlKey = ctrl,
+                .altKey = alt,
+                .metaKey = meta,
+                .deltaX = ev.scroll_x * -120, // Scale to match browser wheel delta
+                .deltaY = ev.scroll_y * -120,
+                .deltaMode = 0, // Pixel mode
+            });
+        },
+        .RESIZED => {
+            // Dispatch resize event with new dimensions
+            js.dispatchResizeEvent(.{
+                .width = @intCast(sapp.width()),
+                .height = @intCast(sapp.height()),
+            });
         },
         else => {},
     }

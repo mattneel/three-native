@@ -830,7 +830,7 @@ pub const ProgramTable = struct {
                     mat_data[7] = @bitCast(src[36..40].*);
                     mat_data[8] = @bitCast(src[40..44].*);
                     const name = mat.name_bytes[0..@as(usize, mat.name_len)];
-                    log.info("applyMatrixUniforms MAT3 '{s}' gl_loc={d} offset={d} data=[{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3}]", .{
+                    log.debug("applyMatrixUniforms MAT3 '{s}' gl_loc={d} offset={d} data=[{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3}]", .{
                         name, mat.gl_location, offset,
                         mat_data[0], mat_data[1], mat_data[2],
                         mat_data[3], mat_data[4], mat_data[5],
