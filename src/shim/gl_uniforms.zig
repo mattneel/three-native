@@ -5,6 +5,7 @@
 //! GL function bindings.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 // GL types
 pub const GLint = c_int;
@@ -39,35 +40,51 @@ pub const GL_TEXTURE_CUBE_MAP: c_uint = 0x8513;
 
 var initialized = false;
 
+// Platform-specific dynamic loading
+const is_windows = builtin.os.tag == .windows;
+
+const windows = if (is_windows) @cImport({
+    @cInclude("windows.h");
+}) else struct {};
+
+const posix = if (!is_windows) @cImport({
+    @cDefine("_GNU_SOURCE", "1");
+    @cInclude("dlfcn.h");
+}) else struct {};
+
+fn getProcAddress(comptime name: [:0]const u8) ?*anyopaque {
+    if (is_windows) {
+        // On Windows, use wglGetProcAddress for GL extensions, GetProcAddress for core GL
+        const wglGetProcAddress_ptr = @as(?*const fn ([*c]const u8) callconv(.c) ?*anyopaque, @ptrCast(windows.GetProcAddress(windows.GetModuleHandleA("opengl32.dll"), "wglGetProcAddress")));
+        if (wglGetProcAddress_ptr) |wglGetProcAddress| {
+            const addr = wglGetProcAddress(name.ptr);
+            if (addr != null) return addr;
+        }
+        // Fall back to GetProcAddress for core GL 1.1 functions
+        return windows.GetProcAddress(windows.GetModuleHandleA("opengl32.dll"), name.ptr);
+    } else {
+        const handle = posix.dlopen(null, posix.RTLD_LAZY);
+        if (handle == null) return null;
+        return posix.dlsym(handle, name.ptr);
+    }
+}
+
 /// Initialize GL function pointers. Call this after GL context is created.
 pub fn init() void {
     if (initialized) return;
 
-    // These are standard GL 2.0+ functions that should be available
-    // Since Sokol already links GL, we can use the C library's dlsym
-    const c = @cImport({
-        @cDefine("_GNU_SOURCE", "1");
-        @cInclude("dlfcn.h");
-    });
-
-    const handle = c.dlopen(null, c.RTLD_LAZY);
-    if (handle == null) {
-        std.log.err("gl_uniforms: failed to dlopen", .{});
-        return;
-    }
-
-    glGetUniformLocation_ptr = @ptrCast(c.dlsym(handle, "glGetUniformLocation"));
-    glUniformMatrix2fv_ptr = @ptrCast(c.dlsym(handle, "glUniformMatrix2fv"));
-    glUniformMatrix3fv_ptr = @ptrCast(c.dlsym(handle, "glUniformMatrix3fv"));
-    glUseProgram_ptr = @ptrCast(c.dlsym(handle, "glUseProgram"));
-    glGetIntegerv_ptr = @ptrCast(c.dlsym(handle, "glGetIntegerv"));
-    glActiveTexture_ptr = @ptrCast(c.dlsym(handle, "glActiveTexture"));
-    glBindTexture_ptr = @ptrCast(c.dlsym(handle, "glBindTexture"));
-    glBindSampler_ptr = @ptrCast(c.dlsym(handle, "glBindSampler"));
-    glUniform1i_ptr = @ptrCast(c.dlsym(handle, "glUniform1i"));
-    glUniform1f_ptr = @ptrCast(c.dlsym(handle, "glUniform1f"));
-    glUniform3fv_ptr = @ptrCast(c.dlsym(handle, "glUniform3fv"));
-    glGetError_ptr = @ptrCast(c.dlsym(handle, "glGetError"));
+    glGetUniformLocation_ptr = @ptrCast(getProcAddress("glGetUniformLocation"));
+    glUniformMatrix2fv_ptr = @ptrCast(getProcAddress("glUniformMatrix2fv"));
+    glUniformMatrix3fv_ptr = @ptrCast(getProcAddress("glUniformMatrix3fv"));
+    glUseProgram_ptr = @ptrCast(getProcAddress("glUseProgram"));
+    glGetIntegerv_ptr = @ptrCast(getProcAddress("glGetIntegerv"));
+    glActiveTexture_ptr = @ptrCast(getProcAddress("glActiveTexture"));
+    glBindTexture_ptr = @ptrCast(getProcAddress("glBindTexture"));
+    glBindSampler_ptr = @ptrCast(getProcAddress("glBindSampler"));
+    glUniform1i_ptr = @ptrCast(getProcAddress("glUniform1i"));
+    glUniform1f_ptr = @ptrCast(getProcAddress("glUniform1f"));
+    glUniform3fv_ptr = @ptrCast(getProcAddress("glUniform3fv"));
+    glGetError_ptr = @ptrCast(getProcAddress("glGetError"));
 
     if (glGetUniformLocation_ptr != null and glUniformMatrix3fv_ptr != null) {
         initialized = true;
