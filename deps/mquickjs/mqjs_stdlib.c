@@ -654,6 +654,7 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_SPECIAL_DEF("Image", 2, constructor, js_Image),
     JS_CFUNC_DEF("__loadImage", 2, js_loadImage),
     JS_CFUNC_DEF("__freeImage", 1, js_freeImage),
+    JS_CFUNC_DEF("__nativeFetch", 1, js_nativeFetch),
 #ifdef CONFIG_CLASS_EXAMPLE
     JS_PROP_CLASS_DEF("Rectangle", &js_rectangle_class),
     JS_PROP_CLASS_DEF("FilledRectangle", &js_filled_rectangle_class),

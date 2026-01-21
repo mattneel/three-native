@@ -22,6 +22,7 @@ JSValue js_dom_getContext(JSContext *ctx, JSValue *this_val, int argc, JSValue *
 JSValue js_Image(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_loadImage(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_freeImage(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_nativeFetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_createBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_deleteBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_bindBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);

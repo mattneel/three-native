@@ -693,6 +693,234 @@ fn createDomStubs(ctx: *c.JSContext) !void {
         dumpException(ctx);
         return error.HelperEvalFailed;
     }
+
+    // Install Promise polyfill and fetch API
+    const promise_fetch_code =
+        \\(function() {
+        \\  // Promise states
+        \\  var PENDING = 0, FULFILLED = 1, REJECTED = 2;
+        \\
+        \\  // Microtask queue (uses setTimeout(fn, 0) for async execution)
+        \\  var microtaskQueue = [];
+        \\  var microtaskScheduled = false;
+        \\
+        \\  function scheduleMicrotasks() {
+        \\    if (!microtaskScheduled && microtaskQueue.length > 0) {
+        \\      microtaskScheduled = true;
+        \\      setTimeout(function() {
+        \\        microtaskScheduled = false;
+        \\        var tasks = microtaskQueue;
+        \\        microtaskQueue = [];
+        \\        for (var i = 0; i < tasks.length; i++) {
+        \\          try { tasks[i](); } catch (e) { console.error('Microtask error:', e); }
+        \\        }
+        \\      }, 0);
+        \\    }
+        \\  }
+        \\
+        \\  function queueMicrotask(fn) {
+        \\    microtaskQueue.push(fn);
+        \\    scheduleMicrotasks();
+        \\  }
+        \\
+        \\  // Promise implementation
+        \\  function Promise(executor) {
+        \\    var self = this;
+        \\    self._state = PENDING;
+        \\    self._value = undefined;
+        \\    self._handlers = [];
+        \\
+        \\    function resolve(value) {
+        \\      if (self._state !== PENDING) return;
+        \\      // Handle promise resolution
+        \\      if (value && typeof value.then === 'function') {
+        \\        value.then(resolve, reject);
+        \\        return;
+        \\      }
+        \\      self._state = FULFILLED;
+        \\      self._value = value;
+        \\      self._notify();
+        \\    }
+        \\
+        \\    function reject(reason) {
+        \\      if (self._state !== PENDING) return;
+        \\      self._state = REJECTED;
+        \\      self._value = reason;
+        \\      self._notify();
+        \\    }
+        \\
+        \\    self._notify = function() {
+        \\      queueMicrotask(function() {
+        \\        for (var i = 0; i < self._handlers.length; i++) {
+        \\          self._handle(self._handlers[i]);
+        \\        }
+        \\        self._handlers = [];
+        \\      });
+        \\    };
+        \\
+        \\    self._handle = function(handler) {
+        \\      if (self._state === PENDING) {
+        \\        self._handlers.push(handler);
+        \\        return;
+        \\      }
+        \\      var cb = self._state === FULFILLED ? handler.onFulfilled : handler.onRejected;
+        \\      if (!cb) {
+        \\        if (self._state === FULFILLED) handler.resolve(self._value);
+        \\        else handler.reject(self._value);
+        \\        return;
+        \\      }
+        \\      try {
+        \\        handler.resolve(cb(self._value));
+        \\      } catch (e) {
+        \\        handler.reject(e);
+        \\      }
+        \\    };
+        \\
+        \\    try {
+        \\      executor(resolve, reject);
+        \\    } catch (e) {
+        \\      reject(e);
+        \\    }
+        \\  }
+        \\
+        \\  Promise.prototype.then = function(onFulfilled, onRejected) {
+        \\    var self = this;
+        \\    return new Promise(function(resolve, reject) {
+        \\      self._handle({
+        \\        onFulfilled: typeof onFulfilled === 'function' ? onFulfilled : null,
+        \\        onRejected: typeof onRejected === 'function' ? onRejected : null,
+        \\        resolve: resolve,
+        \\        reject: reject
+        \\      });
+        \\    });
+        \\  };
+        \\
+        \\  Promise.prototype.catch = function(onRejected) {
+        \\    return this.then(null, onRejected);
+        \\  };
+        \\
+        \\  Promise.prototype.finally = function(onFinally) {
+        \\    return this.then(
+        \\      function(value) { onFinally(); return value; },
+        \\      function(reason) { onFinally(); throw reason; }
+        \\    );
+        \\  };
+        \\
+        \\  Promise.resolve = function(value) {
+        \\    return new Promise(function(resolve) { resolve(value); });
+        \\  };
+        \\
+        \\  Promise.reject = function(reason) {
+        \\    return new Promise(function(_, reject) { reject(reason); });
+        \\  };
+        \\
+        \\  Promise.all = function(promises) {
+        \\    return new Promise(function(resolve, reject) {
+        \\      var results = [];
+        \\      var remaining = promises.length;
+        \\      if (remaining === 0) { resolve(results); return; }
+        \\      for (var i = 0; i < promises.length; i++) {
+        \\        (function(idx) {
+        \\          Promise.resolve(promises[idx]).then(function(value) {
+        \\            results[idx] = value;
+        \\            if (--remaining === 0) resolve(results);
+        \\          }, reject);
+        \\        })(i);
+        \\      }
+        \\    });
+        \\  };
+        \\
+        \\  // Response class for fetch
+        \\  function Response(data, options) {
+        \\    // data is a Uint8Array from native fetch
+        \\    this._data = data;
+        \\    this.ok = options.ok;
+        \\    this.status = options.status;
+        \\    this.statusText = options.statusText || '';
+        \\    this.headers = options.headers || {};
+        \\    this.url = options.url || '';
+        \\  }
+        \\
+        \\  Response.prototype.arrayBuffer = function() {
+        \\    var self = this;
+        \\    return new Promise(function(resolve) {
+        \\      // _data is Uint8Array, return its underlying ArrayBuffer
+        \\      if (self._data && self._data.buffer) {
+        \\        resolve(self._data.buffer);
+        \\      } else {
+        \\        resolve(self._data);
+        \\      }
+        \\    });
+        \\  };
+        \\
+        \\  Response.prototype.text = function() {
+        \\    var self = this;
+        \\    return new Promise(function(resolve) {
+        \\      // _data is Uint8Array, convert to string
+        \\      var arr = self._data;
+        \\      if (!(arr instanceof Uint8Array)) {
+        \\        arr = new Uint8Array(arr);
+        \\      }
+        \\      var str = '';
+        \\      for (var i = 0; i < arr.length; i++) {
+        \\        str += String.fromCharCode(arr[i]);
+        \\      }
+        \\      resolve(str);
+        \\    });
+        \\  };
+        \\
+        \\  Response.prototype.json = function() {
+        \\    return this.text().then(function(text) {
+        \\      return JSON.parse(text);
+        \\    });
+        \\  };
+        \\
+        \\  Response.prototype.blob = function() {
+        \\    // Blob not fully supported, return object with arrayBuffer method
+        \\    var self = this;
+        \\    return new Promise(function(resolve) {
+        \\      resolve({
+        \\        arrayBuffer: function() { return self.arrayBuffer(); },
+        \\        size: self._data ? self._data.length : 0,
+        \\        type: ''
+        \\      });
+        \\    });
+        \\  };
+        \\
+        \\  // fetch() API
+        \\  function fetch(url, options) {
+        \\    return new Promise(function(resolve, reject) {
+        \\      // Use setTimeout to make it async (matches browser behavior)
+        \\      setTimeout(function() {
+        \\        try {
+        \\          // __nativeFetch returns { data: Uint8Array, status: number } or throws
+        \\          var result = __nativeFetch(url);
+        \\          var response = new Response(result.data, {
+        \\            ok: result.status >= 200 && result.status < 300,
+        \\            status: result.status,
+        \\            statusText: result.status === 200 ? 'OK' : 'Error',
+        \\            url: url
+        \\          });
+        \\          resolve(response);
+        \\        } catch (e) {
+        \\          reject(new TypeError('Network request failed: ' + e));
+        \\        }
+        \\      }, 0);
+        \\    });
+        \\  }
+        \\
+        \\  // Export to global
+        \\  globalThis.Promise = Promise;
+        \\  globalThis.fetch = fetch;
+        \\  globalThis.Response = Response;
+        \\  globalThis.queueMicrotask = queueMicrotask;
+        \\})();
+    ;
+    const promise_result = c.JS_Eval(ctx, promise_fetch_code, promise_fetch_code.len, "promise_fetch", 0);
+    if (promise_result == c.JS_EXCEPTION) {
+        dumpException(ctx);
+        return error.HelperEvalFailed;
+    }
 }
 
 const GL_ARRAY_BUFFER: u32 = 34962;
@@ -1081,6 +1309,76 @@ export fn js_load(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSVa
     eval_buf[sanitized.bytes.len] = 0;
 
     return c.JS_Eval(ctx, eval_buf.ptr, sanitized.bytes.len, filename, 0);
+}
+
+/// Native fetch implementation - reads file and returns { data: Uint8Array, status: number }
+export fn js_nativeFetch(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) {
+        return throwTypeError(ctx, "__nativeFetch requires a URL");
+    }
+
+    const rt = getRuntime(ctx) orelse {
+        return throwInternalError(ctx, "runtime not initialized");
+    };
+
+    var buf: c.JSCStringBuf = undefined;
+    const url_cstr = c.JS_ToCString(ctx, argv[0], &buf);
+    if (url_cstr == null) {
+        return c.JS_EXCEPTION;
+    }
+
+    const url = std.mem.span(@as([*:0]const u8, @ptrCast(url_cstr)));
+
+    // Strip leading ./ if present for relative paths
+    var path = url;
+    if (std.mem.startsWith(u8, path, "./")) {
+        path = path[2..];
+    }
+
+    // Read the file
+    const max_bytes: usize = 64 * 1024 * 1024; // 64 MB max
+    const data = std.fs.cwd().readFileAlloc(rt.allocator, path, max_bytes) catch |err| {
+        // Return error - the JS side will handle this
+        return switch (err) {
+            error.FileNotFound => throwTypeError(ctx, "File not found"),
+            error.AccessDenied => throwTypeError(ctx, "Access denied"),
+            else => throwInternalError(ctx, "Failed to read file"),
+        };
+    };
+    defer rt.allocator.free(data);
+
+    // Create result object: { data: Uint8Array, status: 200 }
+    const result = c.JS_NewObject(ctx);
+
+    // Create Uint8Array by evaluating: new Uint8Array([...bytes...])
+    // For efficiency, we create an ArrayBuffer and view it as Uint8Array
+    // Build the array as a JS array first
+    const arr = c.JS_NewArray(ctx, @intCast(data.len));
+    for (data, 0..) |byte, i| {
+        _ = c.JS_SetPropertyUint32(ctx, arr, @intCast(i), c.JS_NewInt32(ctx, @intCast(byte)));
+    }
+
+    // Create Uint8Array from the array: new Uint8Array(arr)
+    // We need to call the Uint8Array constructor with the array
+    const global = c.JS_GetGlobalObject(ctx);
+    const uint8array_ctor = c.JS_GetPropertyStr(ctx, global, "Uint8Array");
+
+    // Push args: new Uint8Array(arr)
+    c.JS_PushArg(ctx, arr);
+    c.JS_PushArg(ctx, uint8array_ctor);
+    c.JS_PushArg(ctx, c.JS_UNDEFINED); // this
+    const uint8arr = c.JS_Call(ctx, 0x100 | 1); // JS_CALL_NEW | 1 arg
+
+    if (c.JS_IsException(uint8arr) != 0) {
+        // Fallback: just use the plain array
+        _ = c.JS_SetPropertyStr(ctx, result, "data", arr);
+    } else {
+        _ = c.JS_SetPropertyStr(ctx, result, "data", uint8arr);
+    }
+
+    _ = c.JS_SetPropertyStr(ctx, result, "status", c.JS_NewInt32(ctx, 200));
+
+    return result;
 }
 
 export fn js_setTimeout(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -3925,4 +4223,177 @@ test "JS gl uniform setters work with linked program" {
 
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_loc", "test"));
     try testing.expectEqual(@as(i32, 1), try rt.evalInt("ok_uniform", "test"));
+}
+
+test "JS Promise basic resolve" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.installDomStubs();
+
+    // Test basic Promise with synchronous resolve
+    try rt.eval(
+        \\var result = 0;
+        \\var p = new Promise(function(resolve) {
+        \\  resolve(42);
+        \\});
+        \\p.then(function(val) {
+        \\  result = val;
+        \\});
+    , "test");
+
+    // Run timers to process microtask queue
+    rt.tick(1.0);
+
+    try testing.expectEqual(@as(i32, 42), try rt.evalInt("result", "test"));
+}
+
+test "JS Promise chaining" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.installDomStubs();
+
+    try rt.eval(
+        \\var result = 0;
+        \\Promise.resolve(10)
+        \\  .then(function(x) { return x * 2; })
+        \\  .then(function(x) { return x + 5; })
+        \\  .then(function(x) { result = x; });
+    , "test");
+
+    rt.tick(1.0);
+    rt.tick(2.0);
+    rt.tick(3.0);
+
+    try testing.expectEqual(@as(i32, 25), try rt.evalInt("result", "test"));
+}
+
+test "JS Promise reject and catch" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.installDomStubs();
+
+    try rt.eval(
+        \\var caught = 0;
+        \\Promise.reject("error")
+        \\  .catch(function(e) { caught = 1; });
+    , "test");
+
+    rt.tick(1.0);
+
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("caught", "test"));
+}
+
+test "JS Promise.all" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.installDomStubs();
+
+    try rt.eval(
+        \\var sum = 0;
+        \\Promise.all([Promise.resolve(1), Promise.resolve(2), Promise.resolve(3)])
+        \\  .then(function(arr) {
+        \\    for (var i = 0; i < arr.length; i++) sum += arr[i];
+        \\  });
+    , "test");
+
+    rt.tick(1.0);
+    rt.tick(2.0);
+
+    try testing.expectEqual(@as(i32, 6), try rt.evalInt("sum", "test"));
+}
+
+test "JS fetch reads file" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.installDomStubs();
+
+    // Create a test file
+    const test_content = "{\"test\": 123}";
+    var tmp_file = try std.fs.cwd().createFile("/tmp/js_fetch_test.json", .{});
+    defer tmp_file.close();
+    try tmp_file.writeAll(test_content);
+
+    try rt.eval(
+        \\var status = 0;
+        \\var value = 0;
+        \\fetch('/tmp/js_fetch_test.json')
+        \\  .then(function(r) { status = r.status; return r.json(); })
+        \\  .then(function(d) { value = d.test; });
+    , "test");
+
+    rt.tick(1.0);
+    rt.tick(2.0);
+    rt.tick(3.0);
+
+    try testing.expectEqual(@as(i32, 200), try rt.evalInt("status", "test"));
+    try testing.expectEqual(@as(i32, 123), try rt.evalInt("value", "test"));
+}
+
+test "JS fetch handles missing file" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.installDomStubs();
+
+    try rt.eval(
+        \\var caught = 0;
+        \\fetch('/nonexistent/file.txt')
+        \\  .catch(function(e) { caught = 1; });
+    , "test");
+
+    rt.tick(1.0);
+    rt.tick(2.0);
+
+    try testing.expectEqual(@as(i32, 1), try rt.evalInt("caught", "test"));
+}
+
+test "JS fetch text response" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var rt = try Runtime.init(gpa.allocator(), 64 * 1024);
+    defer rt.deinit();
+    rt.makeCurrent();
+
+    try rt.installDomStubs();
+
+    // Create a test file
+    var tmp_file = try std.fs.cwd().createFile("/tmp/js_fetch_text.txt", .{});
+    defer tmp_file.close();
+    try tmp_file.writeAll("Hello");
+
+    try rt.eval(
+        \\var textLen = 0;
+        \\fetch('/tmp/js_fetch_text.txt')
+        \\  .then(function(r) { return r.text(); })
+        \\  .then(function(t) { textLen = t.length; });
+    , "test");
+
+    rt.tick(1.0);
+    rt.tick(2.0);
+    rt.tick(3.0);
+
+    try testing.expectEqual(@as(i32, 5), try rt.evalInt("textLen", "test"));
 }
