@@ -30,6 +30,12 @@ pub const SharedState = struct {
     time_ms: f64 = 0,
 };
 
+/// Maximum length for asset root path
+const MaxAssetRootLen: usize = 1024;
+
+/// Maximum concurrent fetch buffers
+const MaxFetchBuffers: usize = 16;
+
 const MaxTimers = 16;
 const MaxRaf = 16;
 
@@ -54,6 +60,8 @@ pub const Runtime = struct {
     raf: [MaxRaf]RafEntry,
     next_raf_id: i32,
     dom_installed: bool,
+    asset_root_buf: [MaxAssetRootLen]u8,
+    asset_root_len: usize,
 
     const Self = @This();
 
@@ -69,7 +77,7 @@ pub const Runtime = struct {
 
         c.JS_SetLogFunc(ctx, logFunc);
 
-        return .{
+        var self = Self{
             .ctx = ctx,
             .mem_buf = mem_buf,
             .allocator = allocator,
@@ -78,7 +86,35 @@ pub const Runtime = struct {
             .raf = [_]RafEntry{.{}} ** MaxRaf,
             .next_raf_id = 1,
             .dom_installed = false,
+            .asset_root_buf = undefined,
+            .asset_root_len = 0,
         };
+        self.setAssetRoot(".") catch {};
+        return self;
+    }
+
+    /// Set the asset root directory for fetch() operations
+    pub fn setAssetRoot(self: *Self, path: []const u8) !void {
+        const resolved = std.fs.cwd().realpathAlloc(self.allocator, path) catch |err| {
+            return switch (err) {
+                error.FileNotFound => error.InvalidAssetRoot,
+                else => error.InvalidAssetRoot,
+            };
+        };
+        defer self.allocator.free(resolved);
+
+        if (resolved.len > MaxAssetRootLen) {
+            return error.AssetRootTooLong;
+        }
+
+        @memcpy(self.asset_root_buf[0..resolved.len], resolved);
+        self.asset_root_len = resolved.len;
+    }
+
+    /// Get the configured asset root path
+    pub fn getAssetRoot(self: *const Self) []const u8 {
+        if (self.asset_root_len == 0) return ".";
+        return self.asset_root_buf[0..self.asset_root_len];
     }
 
     pub fn deinit(self: *Self) void {
@@ -237,6 +273,49 @@ const NativeImage = struct {
 
 var g_native_images: [MaxNativeImages]NativeImage = [_]NativeImage{.{}} ** MaxNativeImages;
 var g_next_native_image_id: u32 = 1;
+
+// =============================================================================
+// Native Fetch Buffer Pool
+// =============================================================================
+
+const NativeFetchBuffer = struct {
+    active: bool = false,
+    data: ?[]u8 = null,
+    allocator: ?std.mem.Allocator = null,
+
+    fn deinit(self: *NativeFetchBuffer) void {
+        if (self.data) |d| {
+            if (self.allocator) |alloc| {
+                alloc.free(d);
+            }
+        }
+        self.* = .{};
+    }
+};
+
+var g_fetch_buffers: [MaxFetchBuffers]NativeFetchBuffer = [_]NativeFetchBuffer{.{}} ** MaxFetchBuffers;
+
+fn allocFetchBuffer() ?u32 {
+    for (g_fetch_buffers[0..], 0..) |*buf, i| {
+        if (!buf.active) {
+            buf.active = true;
+            return @intCast(i);
+        }
+    }
+    return null;
+}
+
+fn getFetchBuffer(handle: u32) ?*NativeFetchBuffer {
+    if (handle >= MaxFetchBuffers) return null;
+    if (!g_fetch_buffers[handle].active) return null;
+    return &g_fetch_buffers[handle];
+}
+
+fn freeFetchBuffer(handle: u32) void {
+    if (handle < MaxFetchBuffers) {
+        g_fetch_buffers[handle].deinit();
+    }
+}
 
 // =============================================================================
 // Event Listener Storage
@@ -709,10 +788,16 @@ fn createDomStubs(ctx: *c.JSContext) !void {
         \\      microtaskScheduled = true;
         \\      setTimeout(function() {
         \\        microtaskScheduled = false;
-        \\        var tasks = microtaskQueue;
-        \\        microtaskQueue = [];
-        \\        for (var i = 0; i < tasks.length; i++) {
-        \\          try { tasks[i](); } catch (e) { console.error('Microtask error:', e); }
+        \\        // Process all microtasks including nested ones in one tick
+        \\        var maxIterations = 1000;
+        \\        var iterations = 0;
+        \\        while (microtaskQueue.length > 0 && iterations < maxIterations) {
+        \\          iterations++;
+        \\          var tasks = microtaskQueue;
+        \\          microtaskQueue = [];
+        \\          for (var i = 0; i < tasks.length; i++) {
+        \\            try { tasks[i](); } catch (e) { console.error('Microtask error:', e); }
+        \\          }
         \\        }
         \\      }, 0);
         \\    }
@@ -763,17 +848,20 @@ fn createDomStubs(ctx: *c.JSContext) !void {
         \\        self._handlers.push(handler);
         \\        return;
         \\      }
-        \\      var cb = self._state === FULFILLED ? handler.onFulfilled : handler.onRejected;
-        \\      if (!cb) {
-        \\        if (self._state === FULFILLED) handler.resolve(self._value);
-        \\        else handler.reject(self._value);
-        \\        return;
-        \\      }
-        \\      try {
-        \\        handler.resolve(cb(self._value));
-        \\      } catch (e) {
-        \\        handler.reject(e);
-        \\      }
+        \\      // Promise/A+ 2.2.4: callbacks must be queued as microtasks
+        \\      queueMicrotask(function() {
+        \\        var cb = self._state === FULFILLED ? handler.onFulfilled : handler.onRejected;
+        \\        if (!cb) {
+        \\          if (self._state === FULFILLED) handler.resolve(self._value);
+        \\          else handler.reject(self._value);
+        \\          return;
+        \\        }
+        \\        try {
+        \\          handler.resolve(cb(self._value));
+        \\        } catch (e) {
+        \\          handler.reject(e);
+        \\        }
+        \\      });
         \\    };
         \\
         \\    try {
@@ -893,9 +981,12 @@ fn createDomStubs(ctx: *c.JSContext) !void {
         \\      // Use setTimeout to make it async (matches browser behavior)
         \\      setTimeout(function() {
         \\        try {
-        \\          // __nativeFetch returns { data: Uint8Array, status: number } or throws
+        \\          // __nativeFetch returns { bufferId, size, status } or throws
         \\          var result = __nativeFetch(url);
-        \\          var response = new Response(result.data, {
+        \\          // Get data from native buffer and free it immediately
+        \\          var data = __getFetchBufferData(result.bufferId);
+        \\          __freeFetchBuffer(result.bufferId);
+        \\          var response = new Response(data, {
         \\            ok: result.status >= 200 && result.status < 300,
         \\            status: result.status,
         \\            statusText: result.status === 200 ? 'OK' : 'Error',
@@ -1311,7 +1402,43 @@ export fn js_load(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSVa
     return c.JS_Eval(ctx, eval_buf.ptr, sanitized.bytes.len, filename, 0);
 }
 
-/// Native fetch implementation - reads file and returns { data: Uint8Array, status: number }
+/// Resolve and validate a path relative to the asset root
+/// Returns the resolved path if valid, or null if the path escapes the asset root
+fn resolveAssetPath(allocator: std.mem.Allocator, asset_root: []const u8, requested_path: []const u8) ?[]const u8 {
+    // Reject absolute paths and obvious traversal attempts
+    if (std.mem.startsWith(u8, requested_path, "/") or
+        std.mem.startsWith(u8, requested_path, "\\"))
+    {
+        return null;
+    }
+
+    // Join asset root with requested path
+    const joined = std.fs.path.join(allocator, &.{ asset_root, requested_path }) catch return null;
+    defer allocator.free(joined);
+
+    // Resolve to real path (follows symlinks, normalizes ..)
+    const resolved = std.fs.cwd().realpathAlloc(allocator, joined) catch return null;
+
+    // Verify the resolved path starts with asset root (prevent traversal)
+    if (!std.mem.startsWith(u8, resolved, asset_root)) {
+        allocator.free(resolved);
+        return null;
+    }
+
+    // Ensure it's either exactly asset_root or has a path separator after it
+    if (resolved.len > asset_root.len) {
+        const next_char = resolved[asset_root.len];
+        if (next_char != '/' and next_char != '\\') {
+            allocator.free(resolved);
+            return null;
+        }
+    }
+
+    return resolved;
+}
+
+/// Native fetch implementation - reads file and returns { bufferId: number, size: number, status: number }
+/// The bufferId can be used with __getFetchBufferData to get the actual Uint8Array data
 export fn js_nativeFetch(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
     if (argc < 1) {
         return throwTypeError(ctx, "__nativeFetch requires a URL");
@@ -1335,50 +1462,99 @@ export fn js_nativeFetch(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*
         path = path[2..];
     }
 
-    // Read the file
+    // Resolve path relative to asset root and validate it doesn't escape
+    const asset_root = rt.getAssetRoot();
+    const resolved_path = resolveAssetPath(rt.allocator, asset_root, path) orelse {
+        return throwTypeError(ctx, "Access denied: path outside asset root");
+    };
+    defer rt.allocator.free(resolved_path);
+
+    // Allocate a buffer from the pool
+    const buffer_id = allocFetchBuffer() orelse {
+        return throwInternalError(ctx, "Too many concurrent fetch operations");
+    };
+    var fetch_buf = &g_fetch_buffers[buffer_id];
+    fetch_buf.allocator = rt.allocator;
+
+    // Read the file using the resolved path directly into the buffer
     const max_bytes: usize = 64 * 1024 * 1024; // 64 MB max
-    const data = std.fs.cwd().readFileAlloc(rt.allocator, path, max_bytes) catch |err| {
-        // Return error - the JS side will handle this
+    fetch_buf.data = std.fs.cwd().readFileAlloc(rt.allocator, resolved_path, max_bytes) catch |err| {
+        freeFetchBuffer(buffer_id);
         return switch (err) {
             error.FileNotFound => throwTypeError(ctx, "File not found"),
             error.AccessDenied => throwTypeError(ctx, "Access denied"),
             else => throwInternalError(ctx, "Failed to read file"),
         };
     };
-    defer rt.allocator.free(data);
 
-    // Create result object: { data: Uint8Array, status: 200 }
+    // Create result object: { bufferId: number, size: number, status: 200 }
     const result = c.JS_NewObject(ctx);
-
-    // Create Uint8Array by evaluating: new Uint8Array([...bytes...])
-    // For efficiency, we create an ArrayBuffer and view it as Uint8Array
-    // Build the array as a JS array first
-    const arr = c.JS_NewArray(ctx, @intCast(data.len));
-    for (data, 0..) |byte, i| {
-        _ = c.JS_SetPropertyUint32(ctx, arr, @intCast(i), c.JS_NewInt32(ctx, @intCast(byte)));
-    }
-
-    // Create Uint8Array from the array: new Uint8Array(arr)
-    // We need to call the Uint8Array constructor with the array
-    const global = c.JS_GetGlobalObject(ctx);
-    const uint8array_ctor = c.JS_GetPropertyStr(ctx, global, "Uint8Array");
-
-    // Push args: new Uint8Array(arr)
-    c.JS_PushArg(ctx, arr);
-    c.JS_PushArg(ctx, uint8array_ctor);
-    c.JS_PushArg(ctx, c.JS_UNDEFINED); // this
-    const uint8arr = c.JS_Call(ctx, 0x100 | 1); // JS_CALL_NEW | 1 arg
-
-    if (c.JS_IsException(uint8arr) != 0) {
-        // Fallback: just use the plain array
-        _ = c.JS_SetPropertyStr(ctx, result, "data", arr);
-    } else {
-        _ = c.JS_SetPropertyStr(ctx, result, "data", uint8arr);
-    }
-
+    _ = c.JS_SetPropertyStr(ctx, result, "bufferId", c.JS_NewInt32(ctx, @intCast(buffer_id)));
+    _ = c.JS_SetPropertyStr(ctx, result, "size", c.JS_NewInt32(ctx, @intCast(fetch_buf.data.?.len)));
     _ = c.JS_SetPropertyStr(ctx, result, "status", c.JS_NewInt32(ctx, 200));
 
     return result;
+}
+
+/// Get data from a fetch buffer as Uint8Array
+/// Called as: __getFetchBufferData(bufferId) -> Uint8Array
+export fn js_getFetchBufferData(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) {
+        return throwTypeError(ctx, "__getFetchBufferData requires bufferId");
+    }
+
+    var buffer_id: i32 = 0;
+    if (c.JS_ToInt32(ctx, &buffer_id, argv[0]) != 0) {
+        return c.JS_EXCEPTION;
+    }
+
+    const fetch_buf = getFetchBuffer(@intCast(buffer_id)) orelse {
+        return throwTypeError(ctx, "Invalid buffer ID");
+    };
+
+    const data = fetch_buf.data orelse {
+        return throwInternalError(ctx, "Buffer has no data");
+    };
+
+    // Create Uint8Array with the data
+    const global = c.JS_GetGlobalObject(ctx);
+    const uint8array_ctor = c.JS_GetPropertyStr(ctx, global, "Uint8Array");
+
+    // Create array with size, then copy data
+    c.JS_PushArg(ctx, c.JS_NewInt32(ctx, @intCast(data.len)));
+    c.JS_PushArg(ctx, uint8array_ctor);
+    c.JS_PushArg(ctx, c.JS_UNDEFINED);
+    const uint8arr = c.JS_Call(ctx, 0x10000 | 1); // FRAME_CF_CTOR | 1 arg
+
+    if (c.JS_IsException(uint8arr) != 0) {
+        return c.JS_EXCEPTION;
+    }
+
+    // Copy data into the Uint8Array
+    for (data, 0..) |byte, i| {
+        _ = c.JS_SetPropertyUint32(ctx, uint8arr, @intCast(i), c.JS_NewInt32(ctx, @intCast(byte)));
+    }
+
+    return uint8arr;
+}
+
+/// Free a fetch buffer
+/// Called as: __freeFetchBuffer(bufferId)
+export fn js_freeFetchBuffer(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) {
+        return c.JS_UNDEFINED;
+    }
+
+    var buffer_id: i32 = 0;
+    if (c.JS_ToInt32(ctx, &buffer_id, argv[0]) != 0) {
+        return c.JS_UNDEFINED;
+    }
+
+    if (buffer_id >= 0) {
+        freeFetchBuffer(@intCast(buffer_id));
+    }
+
+    return c.JS_UNDEFINED;
 }
 
 export fn js_setTimeout(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
@@ -4326,6 +4502,7 @@ test "JS fetch reads file" {
     rt.makeCurrent();
 
     try rt.installDomStubs();
+    try rt.setAssetRoot("/tmp");
 
     // Create a test file
     const test_content = "{\"test\": 123}";
@@ -4336,7 +4513,7 @@ test "JS fetch reads file" {
     try rt.eval(
         \\var status = 0;
         \\var value = 0;
-        \\fetch('/tmp/js_fetch_test.json')
+        \\fetch('js_fetch_test.json')
         \\  .then(function(r) { status = r.status; return r.json(); })
         \\  .then(function(d) { value = d.test; });
     , "test");
@@ -4378,6 +4555,7 @@ test "JS fetch text response" {
     rt.makeCurrent();
 
     try rt.installDomStubs();
+    try rt.setAssetRoot("/tmp");
 
     // Create a test file
     var tmp_file = try std.fs.cwd().createFile("/tmp/js_fetch_text.txt", .{});
@@ -4386,7 +4564,7 @@ test "JS fetch text response" {
 
     try rt.eval(
         \\var textLen = 0;
-        \\fetch('/tmp/js_fetch_text.txt')
+        \\fetch('js_fetch_text.txt')
         \\  .then(function(r) { return r.text(); })
         \\  .then(function(t) { textLen = t.length; });
     , "test");
