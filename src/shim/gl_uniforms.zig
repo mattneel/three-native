@@ -58,13 +58,13 @@ fn getProcAddress(comptime name: [:0]const u8) ?*anyopaque {
         // On Windows, use wglGetProcAddress for GL extensions, GetProcAddress for core GL
         const wgl_ptr = windows.GetProcAddress(opengl32, "wglGetProcAddress");
         if (wgl_ptr) |wgl_fn| {
-            const wglGetProcAddress: *const fn ([*c]const u8) callconv(.c) ?*anyopaque = @ptrCast(wgl_fn);
+            const wglGetProcAddress: *const fn ([*c]const u8) callconv(.c) ?*anyopaque = @ptrCast(@constCast(wgl_fn));
             const addr = wglGetProcAddress(name.ptr);
             if (addr != null) return addr;
         }
         // Fall back to GetProcAddress for core GL 1.1 functions
         const proc = windows.GetProcAddress(opengl32, name.ptr);
-        return if (proc) |p| @ptrCast(p) else null;
+        return if (proc) |p| @constCast(@ptrCast(p)) else null;
     } else {
         const handle = posix.dlopen(null, posix.RTLD_LAZY);
         if (handle == null) return null;
