@@ -313,6 +313,10 @@ static const JSClassDef js_date_class =
 
 static const JSPropDef js_console[] = {
     JS_CFUNC_DEF("log", 1, js_print),
+    JS_CFUNC_DEF("warn", 1, js_print),
+    JS_CFUNC_DEF("error", 1, js_print),
+    JS_CFUNC_DEF("info", 1, js_print),
+    JS_CFUNC_DEF("debug", 1, js_print),
     JS_PROP_END,
 };
 
@@ -364,6 +368,7 @@ static const JSPropDef js_gl[] = {
     JS_CFUNC_DEF("texParameteri", 3, js_gl_texParameteri),
     JS_CFUNC_DEF("texImage2D", 9, js_gl_texImage2D),
     JS_CFUNC_DEF("texSubImage2D", 9, js_gl_texSubImage2D),
+    JS_CFUNC_DEF("texStorage2D", 5, js_gl_texStorage2D),
     JS_CFUNC_DEF("texImage3D", 10, js_gl_texImage3D),
     JS_CFUNC_DEF("texSubImage3D", 10, js_gl_texSubImage3D),
     JS_CFUNC_DEF("generateMipmap", 1, js_gl_generateMipmap),
@@ -528,6 +533,10 @@ static const JSPropDef js_gl[] = {
     JS_PROP_DOUBLE_DEF("UNPACK_COLORSPACE_CONVERSION_WEBGL", 0x9243, 0 ),
     JS_PROP_DOUBLE_DEF("RGBA", 0x1908, 0 ),
     JS_PROP_DOUBLE_DEF("UNSIGNED_BYTE", 0x1401, 0 ),
+    JS_PROP_DOUBLE_DEF("RGBA8", 0x8058, 0 ),
+    JS_PROP_DOUBLE_DEF("RGB8", 0x8051, 0 ),
+    JS_PROP_DOUBLE_DEF("SRGB8_ALPHA8", 0x8C43, 0 ),
+    JS_PROP_DOUBLE_DEF("SRGB8", 0x8C41, 0 ),
     JS_PROP_DOUBLE_DEF("NO_ERROR", 0, 0 ),
     JS_PROP_DOUBLE_DEF("TEXTURE_2D", 0x0DE1, 0 ),
     JS_PROP_DOUBLE_DEF("TEXTURE_CUBE_MAP", 0x8513, 0 ),
@@ -548,6 +557,10 @@ static const JSPropDef js_gl[] = {
     JS_PROP_DOUBLE_DEF("MIRRORED_REPEAT", 0x8370, 0 ),
     JS_PROP_DOUBLE_DEF("NEAREST", 0x2600, 0 ),
     JS_PROP_DOUBLE_DEF("LINEAR", 0x2601, 0 ),
+    JS_PROP_DOUBLE_DEF("NEAREST_MIPMAP_NEAREST", 0x2700, 0 ),
+    JS_PROP_DOUBLE_DEF("LINEAR_MIPMAP_NEAREST", 0x2701, 0 ),
+    JS_PROP_DOUBLE_DEF("NEAREST_MIPMAP_LINEAR", 0x2702, 0 ),
+    JS_PROP_DOUBLE_DEF("LINEAR_MIPMAP_LINEAR", 0x2703, 0 ),
     JS_PROP_DOUBLE_DEF("TEXTURE0", 0x84C0, 0 ),
     JS_PROP_DOUBLE_DEF("LINK_STATUS", 0x8B82, 0 ),
     JS_PROP_DOUBLE_DEF("VALIDATE_STATUS", 0x8B83, 0 ),
@@ -636,6 +649,9 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("__dom_createElement", 1, js_dom_createElement),
     JS_CFUNC_DEF("__dom_createElementNS", 2, js_dom_createElementNS),
     JS_CFUNC_DEF("__dom_getContext", 1, js_dom_getContext),
+    JS_CFUNC_SPECIAL_DEF("Image", 2, constructor, js_Image),
+    JS_CFUNC_DEF("__loadImage", 2, js_loadImage),
+    JS_CFUNC_DEF("__freeImage", 1, js_freeImage),
 #ifdef CONFIG_CLASS_EXAMPLE
     JS_PROP_CLASS_DEF("Rectangle", &js_rectangle_class),
     JS_PROP_CLASS_DEF("FilledRectangle", &js_filled_rectangle_class),

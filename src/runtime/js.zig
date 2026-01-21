@@ -13,6 +13,7 @@ const webgl_shader = @import("../shim/webgl_shader.zig");
 const webgl_program = @import("../shim/webgl_program.zig");
 const webgl_draw = @import("../shim/webgl_draw.zig");
 const webgl_texture = @import("../shim/webgl_texture.zig");
+const image_loader = @import("../shim/image_loader.zig");
 
 const c = @cImport({
     @cInclude("mquickjs_bindings.h");
@@ -82,6 +83,12 @@ pub const Runtime = struct {
     pub fn deinit(self: *Self) void {
         if (g_runtime == self) {
             g_runtime = null;
+        }
+        // Clean up native images to avoid memory leaks
+        for (&g_native_images) |*img| {
+            if (img.active) {
+                img.deinit();
+            }
         }
         g_js_mutex.lock();
         c.JS_FreeContext(self.ctx);
@@ -202,6 +209,54 @@ const MaxTextures: usize = 256;
 const MaxFramebuffers: usize = 64;
 const MaxRenderbuffers: usize = 64;
 const MaxVertexArrays: usize = 64;
+const MaxNativeImages: usize = 64;
+
+// =============================================================================
+// Native Image Storage
+// =============================================================================
+
+const NativeImage = struct {
+    active: bool = false,
+    width: u32 = 0,
+    height: u32 = 0,
+    pixels: ?[]u8 = null,
+    allocator: ?std.mem.Allocator = null,
+
+    fn deinit(self: *NativeImage) void {
+        if (self.pixels) |px| {
+            if (self.allocator) |alloc| {
+                alloc.free(px);
+            }
+        }
+        self.* = .{};
+    }
+};
+
+var g_native_images: [MaxNativeImages]NativeImage = [_]NativeImage{.{}} ** MaxNativeImages;
+var g_next_native_image_id: u32 = 1;
+
+fn allocNativeImage() ?u32 {
+    for (g_native_images[0..], 0..) |*entry, i| {
+        if (!entry.active) {
+            entry.active = true;
+            g_next_native_image_id +%= 1;
+            return @intCast(i + 1); // 1-based handle
+        }
+    }
+    return null;
+}
+
+fn getNativeImage(handle: u32) ?*NativeImage {
+    if (handle == 0 or handle > MaxNativeImages) return null;
+    const idx = handle - 1;
+    if (!g_native_images[idx].active) return null;
+    return &g_native_images[idx];
+}
+
+fn freeNativeImage(handle: u32) void {
+    if (handle == 0 or handle > MaxNativeImages) return;
+    g_native_images[handle - 1].deinit();
+}
 
 const GlState = struct {
     viewport: [4]i32 = .{ 0, 0, 0, 0 },
@@ -343,6 +398,57 @@ fn createDomStubs(ctx: *c.JSContext) !void {
     _ = c.JS_SetPropertyStr(ctx, window_obj, "cancelAnimationFrame", caf);
     _ = c.JS_SetPropertyStr(ctx, global, "window", window_obj);
     _ = c.JS_SetPropertyStr(ctx, global, "self", window_obj);
+
+    // Install img element helper with src getter/setter that triggers image loading
+    const img_helper_code =
+        \\(function() {
+        \\  globalThis.__createImgElement = function() {
+        \\    var img = new Image();
+        \\    img._listeners = { load: [], error: [] };
+        \\    img._src = '';
+        \\    img.complete = false;
+        \\    img.addEventListener = function(type, fn) {
+        \\      if (img._listeners[type]) img._listeners[type].push(fn);
+        \\    };
+        \\    img.removeEventListener = function(type, fn) {
+        \\      if (img._listeners[type]) {
+        \\        var idx = img._listeners[type].indexOf(fn);
+        \\        if (idx >= 0) img._listeners[type].splice(idx, 1);
+        \\      }
+        \\    };
+        \\    Object.defineProperty(img, 'src', {
+        \\      get: function() { return img._src; },
+        \\      set: function(url) {
+        \\        img._src = url;
+        \\        img.complete = false;
+        \\        setTimeout(function() {
+        \\          try {
+        \\            __loadImage(img, url);
+        \\            img.complete = true;
+        \\            var evt = { type: 'load', target: img };
+        \\            for (var i = 0; i < img._listeners.load.length; i++) {
+        \\              img._listeners.load[i].call(img, evt);
+        \\            }
+        \\            if (img.onload) img.onload.call(img, evt);
+        \\          } catch (e) {
+        \\            var evt = { type: 'error', target: img, error: e };
+        \\            for (var i = 0; i < img._listeners.error.length; i++) {
+        \\              img._listeners.error[i].call(img, evt);
+        \\            }
+        \\            if (img.onerror) img.onerror.call(img, evt);
+        \\          }
+        \\        }, 0);
+        \\      }
+        \\    });
+        \\    return img;
+        \\  };
+        \\})();
+    ;
+    const result = c.JS_Eval(ctx, img_helper_code, img_helper_code.len, "img_helper", 0);
+    if (result == c.JS_EXCEPTION) {
+        dumpException(ctx);
+        return error.HelperEvalFailed;
+    }
 }
 
 const GL_ARRAY_BUFFER: u32 = 34962;
@@ -850,6 +956,21 @@ export fn js_dom_noop(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue)
 }
 
 fn createElementForTag(ctx: *c.JSContext, tag: []const u8) c.JSValue {
+    // For img elements, use the JS helper that sets up src getter/setter
+    if (std.mem.eql(u8, tag, "img")) {
+        const global = c.JS_GetGlobalObject(ctx);
+        const create_img = c.JS_GetPropertyStr(ctx, global, "__createImgElement");
+        if (c.JS_IsFunction(ctx, create_img) != 0) {
+            c.JS_PushArg(ctx, create_img);
+            c.JS_PushArg(ctx, c.JS_NULL);
+            const result = c.JS_Call(ctx, 0);
+            if (c.JS_IsException(result) == 0) {
+                return result;
+            }
+            dumpException(ctx);
+        }
+    }
+
     const elem = c.JS_NewObject(ctx);
     const style = c.JS_NewObject(ctx);
     _ = c.JS_SetPropertyStr(ctx, elem, "style", style);
@@ -937,6 +1058,140 @@ export fn js_dom_getContext(ctx: *c.JSContext, this_val: *c.JSValue, argc: c_int
 
     _ = c.JS_SetPropertyStr(ctx, canvas, "_ctx", gl_val);
     return gl_val;
+}
+
+// =============================================================================
+// Image constructor and loading
+// =============================================================================
+
+/// Image constructor: new Image() or new Image(width, height)
+export fn js_Image(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    const img = c.JS_NewObject(ctx);
+
+    // Set default properties
+    var width: i32 = 0;
+    var height: i32 = 0;
+    if (argc >= 2) {
+        _ = c.JS_ToInt32(ctx, &width, argv[0]);
+        _ = c.JS_ToInt32(ctx, &height, argv[1]);
+    }
+    _ = c.JS_SetPropertyStr(ctx, img, "width", c.JS_NewInt32(ctx, width));
+    _ = c.JS_SetPropertyStr(ctx, img, "height", c.JS_NewInt32(ctx, height));
+    _ = c.JS_SetPropertyStr(ctx, img, "complete", c.JS_FALSE);
+    _ = c.JS_SetPropertyStr(ctx, img, "naturalWidth", c.JS_NewInt32(ctx, 0));
+    _ = c.JS_SetPropertyStr(ctx, img, "naturalHeight", c.JS_NewInt32(ctx, 0));
+
+    // Mark this as a native Image for detection in texImage2D
+    _ = c.JS_SetPropertyStr(ctx, img, "_isNativeImage", c.JS_TRUE);
+
+    // Native handle for pixel data (0 = not loaded)
+    _ = c.JS_SetPropertyStr(ctx, img, "_nativeHandle", c.JS_NewInt32(ctx, 0));
+
+    return img;
+}
+
+/// Load an image from a file path and populate the Image object
+/// Called as: __loadImage(imageObj, path)
+export fn js_loadImage(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 2) return throwTypeError(ctx, "__loadImage requires (image, path)");
+
+    const img_obj = argv[0];
+    // Verify it's an object-like value (not a primitive)
+    if (c.JS_IsNull(img_obj) != 0 or c.JS_IsUndefined(img_obj) != 0 or c.JS_IsBool(img_obj) != 0) {
+        return throwTypeError(ctx, "__loadImage: first argument must be an Image object");
+    }
+
+    // Get path string
+    if (c.JS_IsString(ctx, argv[1]) == 0) {
+        return throwTypeError(ctx, "__loadImage: second argument must be a string path");
+    }
+    var len: usize = 0;
+    var buf: c.JSCStringBuf = undefined;
+    const c_str = c.JS_ToCStringLen(ctx, &len, argv[1], &buf);
+    if (c_str == null) return c.JS_EXCEPTION;
+    const path = @as([*]const u8, @ptrCast(c_str))[0..len];
+
+    // Get runtime allocator
+    const runtime = getRuntime(ctx) orelse return throwInternalError(ctx, "no runtime");
+
+    // Load image file
+    var image_data = image_loader.loadFromFile(runtime.allocator, path) catch |err| {
+        // Set error state
+        _ = c.JS_SetPropertyStr(ctx, img_obj, "_loadError", c.JS_TRUE);
+        log.debug("__loadImage: failed to load '{s}': {s}", .{ path, @errorName(err) });
+        return c.JS_FALSE;
+    };
+
+    // Allocate native image slot
+    const handle = allocNativeImage() orelse {
+        image_data.deinit();
+        return throwInternalError(ctx, "too many native images");
+    };
+
+    // Transfer pixel ownership to native storage
+    const native_img = getNativeImage(handle) orelse {
+        image_data.deinit();
+        return throwInternalError(ctx, "failed to get native image");
+    };
+    native_img.width = image_data.width;
+    native_img.height = image_data.height;
+    native_img.allocator = image_data.allocator;
+    native_img.pixels = image_data.pixels;
+
+    // Don't free pixels - ownership transferred to native storage
+    image_data.pixels = undefined;
+
+    // Update Image object properties
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "width", c.JS_NewInt32(ctx, @intCast(native_img.width)));
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "height", c.JS_NewInt32(ctx, @intCast(native_img.height)));
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "naturalWidth", c.JS_NewInt32(ctx, @intCast(native_img.width)));
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "naturalHeight", c.JS_NewInt32(ctx, @intCast(native_img.height)));
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "complete", c.JS_TRUE);
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "_nativeHandle", c.JS_NewInt32(ctx, @intCast(handle)));
+
+    // Call onload callback if present
+    const onload = c.JS_GetPropertyStr(ctx, img_obj, "onload");
+    if (c.JS_IsFunction(ctx, onload) != 0) {
+        if (c.JS_StackCheck(ctx, 2) == 0) {
+            c.JS_PushArg(ctx, onload);
+            c.JS_PushArg(ctx, img_obj);
+            const ret = c.JS_Call(ctx, 0);
+            if (c.JS_IsException(ret) != 0) {
+                dumpException(ctx);
+            }
+        }
+    }
+
+    log.debug("__loadImage: loaded '{s}' ({d}x{d})", .{ path, image_data.width, image_data.height });
+    return c.JS_TRUE;
+}
+
+/// Free an image's native pixel data
+/// Called as: __freeImage(imageObj)
+export fn js_freeImage(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 1) return c.JS_UNDEFINED;
+
+    const img_obj = argv[0];
+    if (c.JS_IsNull(img_obj) != 0 or c.JS_IsUndefined(img_obj) != 0) {
+        return c.JS_UNDEFINED;
+    }
+
+    // Get native handle
+    var handle_val: i32 = 0;
+    const handle_prop = c.JS_GetPropertyStr(ctx, img_obj, "_nativeHandle");
+    if (c.JS_ToInt32(ctx, &handle_val, handle_prop) != 0 or handle_val <= 0) {
+        return c.JS_UNDEFINED; // No handle or already freed
+    }
+
+    // Free the native image
+    freeNativeImage(@intCast(handle_val));
+
+    // Clear the handle on the JS object to prevent reuse
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "_nativeHandle", c.JS_NewInt32(ctx, 0));
+    _ = c.JS_SetPropertyStr(ctx, img_obj, "complete", c.JS_FALSE);
+
+    log.debug("__freeImage: freed handle {d}", .{handle_val});
+    return c.JS_TRUE;
 }
 
 fn setEnableState(cap: u32, enabled: bool) void {
@@ -1346,11 +1601,13 @@ export fn js_gl_texParameteri(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, arg
         else => return c.JS_UNDEFINED,
     };
     mgr.texParameteri(tex_target, pname, param) catch |err| {
+        log.debug("texParameteri FAILED: pname={x} param={x} err={s}", .{ pname, param, @errorName(err) });
         return switch (err) {
             error.InvalidEnum => throwTypeError(ctx, "invalid texture parameter enum value"),
             error.NoTextureBound, error.InvalidHandle => c.JS_UNDEFINED,
         };
     };
+    log.info("texParameteri: pname={x} param={x}", .{ pname, param });
     return c.JS_UNDEFINED;
 }
 
@@ -1412,17 +1669,194 @@ export fn js_gl_texImage2D(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
             }
         }
 
+        log.info("texImage2D(9-arg): {d}x{d} internal_format={x} format={x} pixels={any}", .{ width, height, internal_format, format, pixels != null });
         mgr.texImage2D(tex_target, width, height, tex_format, internal_format, pixel_type, pixels) catch {};
     } else {
         // 6-argument form: texImage2D(target, level, internalformat, format, type, source)
-        // This form is used for Image/Canvas sources which are not yet supported
-        return throwTypeError(ctx, "texImage2D with Image/Canvas source not yet supported");
+        log.debug("texImage2D: 6-arg form, argc={d}", .{argc});
+        var format: u32 = 0;
+        var pixel_type: u32 = 0;
+        if (c.JS_ToUint32(ctx, &format, argv[3]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &pixel_type, argv[4]) != 0) return c.JS_EXCEPTION;
+
+        const source = argv[5];
+
+        // Check if source is a native Image object
+        const is_native = c.JS_GetPropertyStr(ctx, source, "_isNativeImage");
+        // Compare tag and value manually since JSValue is uint64_t
+        const is_native_bool = (c.JS_IsBool(is_native) != 0) and (is_native == c.JS_TRUE);
+        log.debug("texImage2D: is_native check, is_native={x}, JS_TRUE={x}, match={}", .{ is_native, c.JS_TRUE, is_native_bool });
+        if (is_native_bool) {
+            // Get native handle
+            var handle_val: i32 = 0;
+            const handle_prop = c.JS_GetPropertyStr(ctx, source, "_nativeHandle");
+            if (c.JS_ToInt32(ctx, &handle_val, handle_prop) != 0 or handle_val <= 0) {
+                return throwTypeError(ctx, "Image not loaded (no native handle)");
+            }
+
+            // Get native image data
+            const native_img = getNativeImage(@intCast(handle_val)) orelse {
+                return throwTypeError(ctx, "Invalid native image handle");
+            };
+
+            const pixels = native_img.pixels orelse {
+                return throwTypeError(ctx, "Image has no pixel data");
+            };
+
+            const tex_format: webgl_texture.TextureFormat = switch (format) {
+                0x1908 => .rgba,
+                0x1907 => .rgb,
+                0x190A => .luminance_alpha,
+                0x1909 => .luminance,
+                0x1906 => .alpha,
+                else => .rgba,
+            };
+
+            log.debug("texImage2D(Image): {d}x{d} format={x}", .{ native_img.width, native_img.height, format });
+            mgr.texImage2D(tex_target, native_img.width, native_img.height, tex_format, internal_format, pixel_type, pixels) catch {};
+        } else {
+            return throwTypeError(ctx, "texImage2D: source must be an Image object");
+        }
     }
 
     return c.JS_UNDEFINED;
 }
 
-export fn js_gl_texSubImage2D(_: *c.JSContext, _: *c.JSValue, _: c_int, _: [*]c.JSValue) callconv(.c) c.JSValue {
+/// texStorage2D(target, levels, internalformat, width, height)
+/// Allocates immutable storage for a texture
+export fn js_gl_texStorage2D(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 5) return c.JS_UNDEFINED;
+
+    var target: u32 = 0;
+    var levels: i32 = 0;
+    var internal_format: u32 = 0;
+    var width: u32 = 0;
+    var height: u32 = 0;
+    if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToInt32(ctx, &levels, argv[1]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToUint32(ctx, &internal_format, argv[2]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToUint32(ctx, &width, argv[3]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToUint32(ctx, &height, argv[4]) != 0) return c.JS_EXCEPTION;
+
+    log.info("texStorage2D: target={x} levels={d} format={x} size={d}x{d}", .{ target, levels, internal_format, width, height });
+
+    const mgr = webgl_texture.globalTextureManager();
+    const tex_target: webgl_texture.TextureTarget = switch (target) {
+        GL_TEXTURE_2D => .texture_2d,
+        else => return c.JS_UNDEFINED,
+    };
+
+    // Allocate storage by calling texImage2D with null data
+    // This reserves space in the CPU pool for later texSubImage2D calls
+    const tex_format: webgl_texture.TextureFormat = switch (internal_format) {
+        0x8058 => .rgba, // GL_RGBA8
+        0x8051 => .rgb, // GL_RGB8
+        0x1908 => .rgba, // GL_RGBA
+        0x1907 => .rgb, // GL_RGB
+        else => .rgba,
+    };
+
+    mgr.texImage2D(tex_target, width, height, tex_format, internal_format, 0x1401, null) catch {};
+    return c.JS_UNDEFINED;
+}
+
+/// texSubImage2D has two forms:
+/// texSubImage2D(target, level, xoffset, yoffset, width, height, format, type, source) - 9 args
+/// texSubImage2D(target, level, xoffset, yoffset, format, type, source) - 7 args (Image source)
+export fn js_gl_texSubImage2D(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [*]c.JSValue) callconv(.c) c.JSValue {
+    if (argc < 7) return c.JS_UNDEFINED;
+
+    var target: u32 = 0;
+    var level: i32 = 0;
+    var xoffset: i32 = 0;
+    var yoffset: i32 = 0;
+    if (c.JS_ToUint32(ctx, &target, argv[0]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToInt32(ctx, &level, argv[1]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToInt32(ctx, &xoffset, argv[2]) != 0) return c.JS_EXCEPTION;
+    if (c.JS_ToInt32(ctx, &yoffset, argv[3]) != 0) return c.JS_EXCEPTION;
+
+    // Only support level 0 for now
+    if (level != 0) return c.JS_UNDEFINED;
+
+    const mgr = webgl_texture.globalTextureManager();
+    const tex_target: webgl_texture.TextureTarget = switch (target) {
+        GL_TEXTURE_2D => .texture_2d,
+        else => return c.JS_UNDEFINED,
+    };
+
+    if (argc >= 9) {
+        // 9-arg form with explicit width/height
+        var width: u32 = 0;
+        var height: u32 = 0;
+        var format: u32 = 0;
+        var pixel_type: u32 = 0;
+        if (c.JS_ToUint32(ctx, &width, argv[4]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &height, argv[5]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &format, argv[6]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &pixel_type, argv[7]) != 0) return c.JS_EXCEPTION;
+
+        // Get pixel data from typed array
+        var c_ptr: [*c]u8 = null;
+        var len: usize = 0;
+        if (c.JS_GetTypedArrayData(ctx, argv[8], &c_ptr, &len) == 0 and c_ptr != null and len > 0) {
+            const pixels = @as([*]const u8, @ptrCast(c_ptr))[0..len];
+            const tex_format: webgl_texture.TextureFormat = switch (format) {
+                0x1908 => .rgba,
+                0x1907 => .rgb,
+                else => .rgba,
+            };
+            log.info("texSubImage2D(TypedArray 9-arg): {d}x{d} format={x} len={d}", .{ width, height, format, len });
+            // For subimage, we need to upload the full texture data
+            // For now, treat subimage at (0,0) as a full image upload
+            if (xoffset == 0 and yoffset == 0) {
+                mgr.texImage2D(tex_target, width, height, tex_format, format, pixel_type, pixels) catch {};
+            }
+        } else {
+            log.info("texSubImage2D(9-arg): no typed array data, width={d} height={d}", .{ width, height });
+        }
+    } else {
+        // 7-arg form with Image source
+        var format: u32 = 0;
+        var pixel_type: u32 = 0;
+        if (c.JS_ToUint32(ctx, &format, argv[4]) != 0) return c.JS_EXCEPTION;
+        if (c.JS_ToUint32(ctx, &pixel_type, argv[5]) != 0) return c.JS_EXCEPTION;
+
+        const source = argv[6];
+
+        // Check if source is a native Image object
+        const is_native = c.JS_GetPropertyStr(ctx, source, "_isNativeImage");
+        const is_native_bool = (c.JS_IsBool(is_native) != 0) and (is_native == c.JS_TRUE);
+
+        if (is_native_bool) {
+            var handle_val: i32 = 0;
+            const handle_prop = c.JS_GetPropertyStr(ctx, source, "_nativeHandle");
+            if (c.JS_ToInt32(ctx, &handle_val, handle_prop) != 0 or handle_val <= 0) {
+                return throwTypeError(ctx, "Image not loaded (no native handle)");
+            }
+
+            const native_img = getNativeImage(@intCast(handle_val)) orelse {
+                return throwTypeError(ctx, "Invalid native image handle");
+            };
+
+            const pixels = native_img.pixels orelse {
+                return throwTypeError(ctx, "Image has no pixel data");
+            };
+
+            const tex_format: webgl_texture.TextureFormat = switch (format) {
+                0x1908 => .rgba,
+                0x1907 => .rgb,
+                else => .rgba,
+            };
+
+            log.info("texSubImage2D(Image 7-arg): {d}x{d} format={x} len={d}", .{ native_img.width, native_img.height, format, pixels.len });
+
+            // Upload using texImage2D (for offset 0,0 this works)
+            if (xoffset == 0 and yoffset == 0) {
+                mgr.texImage2D(tex_target, native_img.width, native_img.height, tex_format, format, pixel_type, pixels) catch {};
+            }
+        }
+    }
+
     return c.JS_UNDEFINED;
 }
 
@@ -2446,6 +2880,10 @@ export fn js_gl_getUniformLocation(ctx: *c.JSContext, _: *c.JSValue, argc: c_int
     const loc = programs.getUniformLocation(programIdFromU32(raw), slice[0..len]) catch {
         return throwTypeError(ctx, "invalid program handle");
     };
+    // Log uniform location queries for debugging
+    if (std.mem.eql(u8, slice[0..len], "diffuse") or std.mem.eql(u8, slice[0..len], "map")) {
+        log.info("getUniformLocation: '{s}' -> {d}", .{ slice[0..len], loc });
+    }
     return c.JS_NewInt32(ctx, @intCast(loc));
 }
 
@@ -2489,6 +2927,7 @@ export fn js_gl_uniform3f(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     if (c.JS_ToNumber(ctx, &x, argv[1]) != 0) return c.JS_EXCEPTION;
     if (c.JS_ToNumber(ctx, &y, argv[2]) != 0) return c.JS_EXCEPTION;
     if (c.JS_ToNumber(ctx, &z, argv[3]) != 0) return c.JS_EXCEPTION;
+    log.debug("uniform3f: location={d} x={d:.4} y={d:.4} z={d:.4}", .{ loc, @as(f32, @floatCast(x)), @as(f32, @floatCast(y)), @as(f32, @floatCast(z)) });
     const values = [_]f32{ @floatCast(x), @floatCast(y), @floatCast(z) };
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, values[0..]) catch {
         return c.JS_UNDEFINED;
@@ -2521,6 +2960,7 @@ export fn js_gl_uniform1i(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: [
     const prog = webgl_draw.currentProgram() orelse return throwTypeError(ctx, "no program in use");
     var x: c_int = 0;
     if (c.JS_ToInt32(ctx, &x, argv[1]) != 0) return c.JS_EXCEPTION;
+    log.debug("uniform1i: location={d} value={d}", .{ loc, x });
     const values = [_]i32{@intCast(x)};
     webgl_program.globalProgramTable().setUniformInts(prog, loc, values[0..]) catch {
         return c.JS_UNDEFINED;
@@ -2608,6 +3048,19 @@ export fn js_gl_uniformMatrix3fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, 
     const count = readFloatValues(ctx, argv[2], temp[0..]) catch {
         return throwTypeError(ctx, "uniformMatrix3fv requires Float32Array");
     };
+    log.debug("uniformMatrix3fv: location={d} count={d} data=[{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4}]", .{
+        loc,
+        count,
+        if (count > 0) temp[0] else 0,
+        if (count > 1) temp[1] else 0,
+        if (count > 2) temp[2] else 0,
+        if (count > 3) temp[3] else 0,
+        if (count > 4) temp[4] else 0,
+        if (count > 5) temp[5] else 0,
+        if (count > 6) temp[6] else 0,
+        if (count > 7) temp[7] else 0,
+        if (count > 8) temp[8] else 0,
+    });
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
         return c.JS_UNDEFINED;
     };
@@ -2667,6 +3120,13 @@ export fn js_gl_uniform3fv(ctx: *c.JSContext, _: *c.JSValue, argc: c_int, argv: 
     const count = readFloatValues(ctx, argv[1], temp[0..]) catch {
         return throwTypeError(ctx, "uniform3fv requires Float32Array");
     };
+    log.debug("uniform3fv: location={d} count={d} data=[{d:.4},{d:.4},{d:.4}]", .{
+        loc,
+        count,
+        if (count > 0) temp[0] else 0,
+        if (count > 1) temp[1] else 0,
+        if (count > 2) temp[2] else 0,
+    });
     webgl_program.globalProgramTable().setUniformFloats(prog, loc, temp[0..count]) catch {
         return c.JS_UNDEFINED;
     };

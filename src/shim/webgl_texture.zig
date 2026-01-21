@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const sokol = @import("sokol");
 const sg = sokol.gfx;
+const log = std.log.scoped(.webgl_texture);
 
 // =============================================================================
 // Constants
@@ -85,9 +86,11 @@ pub const Texture = struct {
     params: TextureParams,
     backend: sg.Image, // Sokol image handle (set in T3)
     backend_view: sg.View, // Sokol view for binding (set in T3)
+    backend_sampler: sg.Sampler, // Sokol sampler for texture params
     cpu_block_start: u16,
     cpu_block_count: u16,
     dirty: bool, // True if CPU data needs upload to GPU
+    params_dirty: bool, // True if sampler params need refresh
 };
 
 // =============================================================================
@@ -196,9 +199,11 @@ pub const TextureTable = struct {
                     .params = .{},
                     .backend = .{},
                     .backend_view = .{},
+                    .backend_sampler = .{},
                     .cpu_block_start = 0,
                     .cpu_block_count = 0,
                     .dirty = false,
+                    .params_dirty = false,
                 },
             };
         }
@@ -267,9 +272,11 @@ pub const TextureTable = struct {
                     .params = .{},
                     .backend = .{},
                     .backend_view = .{},
+                    .backend_sampler = .{},
                     .cpu_block_start = 0,
                     .cpu_block_count = 0,
                     .dirty = false,
+                    .params_dirty = true, // Start dirty to ensure initial sampler creation
                 };
                 entry.active = true;
                 self.count += 1;
@@ -303,6 +310,9 @@ pub const TextureTable = struct {
         }
 
         // Destroy backend resources if valid
+        if (entry.texture.backend_sampler.id != 0) {
+            sg.destroySampler(entry.texture.backend_sampler);
+        }
         if (entry.texture.backend_view.id != 0) {
             sg.destroyView(entry.texture.backend_view);
         }
@@ -317,7 +327,9 @@ pub const TextureTable = struct {
         entry.texture.data_len = 0;
         entry.texture.backend = .{};
         entry.texture.backend_view = .{};
+        entry.texture.backend_sampler = .{};
         entry.texture.dirty = false;
+        entry.texture.params_dirty = false;
         self.count -= 1;
         return true;
     }
@@ -348,18 +360,29 @@ pub const TextureTable = struct {
     ) !void {
         const tex = self.get(id) orelse return error.InvalidHandle;
 
-        // Calculate required size based on format
-        const bytes_per_pixel: u32 = switch (format) {
+        // Calculate source data size based on input format
+        const src_bytes_per_pixel: u32 = switch (format) {
             .rgba => 4,
             .rgb => 3,
             .luminance_alpha => 2,
             .luminance, .alpha => 1,
         };
-        const data_size = width * height * bytes_per_pixel;
+        const src_data_size = width * height * src_bytes_per_pixel;
+
+        // Backend always uses RGBA8 (4 bytes per pixel) for RGB/RGBA
+        // So we need to convert RGB to RGBA
+        const storage_format: TextureFormat = if (format == .rgb) .rgba else format;
+        const storage_bytes_per_pixel: u32 = switch (storage_format) {
+            .rgba => 4,
+            .rgb => 4, // Stored as RGBA
+            .luminance_alpha => 2,
+            .luminance, .alpha => 1,
+        };
+        const storage_size = width * height * storage_bytes_per_pixel;
 
         // Free existing CPU data if dimensions/format changed
         if (tex.cpu_block_count > 0 and
-            (tex.width != width or tex.height != height or tex.format != format))
+            (tex.width != width or tex.height != height or tex.format != storage_format))
         {
             self.cpu_pool.free(.{
                 .block_start = tex.cpu_block_start,
@@ -371,20 +394,20 @@ pub const TextureTable = struct {
             tex.data_len = 0;
         }
 
-        // Update texture metadata
+        // Update texture metadata (store as RGBA for RGB input)
         tex.target = target;
         tex.width = width;
         tex.height = height;
-        tex.format = format;
+        tex.format = storage_format;
         tex.internal_format = internal_format;
         tex.pixel_type = pixel_type;
 
         // Allocate CPU storage and copy data if provided
         if (data) |pixels| {
-            if (pixels.len < data_size) return error.InsufficientData;
+            if (pixels.len < src_data_size) return error.InsufficientData;
 
             // Allocate new CPU block if needed
-            if (tex.cpu_block_count == 0 or tex.data_len < data_size) {
+            if (tex.cpu_block_count == 0 or tex.data_len < storage_size) {
                 if (tex.cpu_block_count > 0) {
                     self.cpu_pool.free(.{
                         .block_start = tex.cpu_block_start,
@@ -392,33 +415,48 @@ pub const TextureTable = struct {
                         .size = tex.data_len,
                     });
                 }
-                const cpu_slice = try self.cpu_pool.alloc(data_size);
+                const cpu_slice = try self.cpu_pool.alloc(storage_size);
                 tex.cpu_block_start = cpu_slice.block_start;
                 tex.cpu_block_count = cpu_slice.block_count;
             }
 
-            tex.data_len = data_size;
+            tex.data_len = storage_size;
 
             // Copy pixel data to CPU pool
             const dst = self.cpu_pool.slice(.{
                 .block_start = tex.cpu_block_start,
                 .block_count = tex.cpu_block_count,
-                .size = data_size,
+                .size = storage_size,
             });
-            @memcpy(dst[0..data_size], pixels[0..data_size]);
+
+            // Convert RGB to RGBA by padding alpha if needed
+            if (format == .rgb) {
+                const pixel_count = width * height;
+                var i: usize = 0;
+                while (i < pixel_count) : (i += 1) {
+                    const src_offset = i * 3;
+                    const dst_offset = i * 4;
+                    dst[dst_offset + 0] = pixels[src_offset + 0];
+                    dst[dst_offset + 1] = pixels[src_offset + 1];
+                    dst[dst_offset + 2] = pixels[src_offset + 2];
+                    dst[dst_offset + 3] = 255; // Full alpha
+                }
+            } else {
+                @memcpy(dst[0..storage_size], pixels[0..storage_size]);
+            }
             tex.dirty = true;
         } else {
             // No data provided - just update dimensions (reserve space)
-            if (data_size > 0 and tex.cpu_block_count == 0) {
-                const cpu_slice = try self.cpu_pool.alloc(data_size);
+            if (storage_size > 0 and tex.cpu_block_count == 0) {
+                const cpu_slice = try self.cpu_pool.alloc(storage_size);
                 tex.cpu_block_start = cpu_slice.block_start;
                 tex.cpu_block_count = cpu_slice.block_count;
-                tex.data_len = data_size;
+                tex.data_len = storage_size;
                 // Zero-fill the allocated space
                 const dst = self.cpu_pool.slice(.{
                     .block_start = tex.cpu_block_start,
                     .block_count = tex.cpu_block_count,
-                    .size = data_size,
+                    .size = storage_size,
                 });
                 @memset(dst, 0);
                 tex.dirty = true;
@@ -565,15 +603,19 @@ pub const TextureManager = struct {
         switch (pname) {
             GL_TEXTURE_MIN_FILTER => {
                 tex.params.min_filter = std.meta.intToEnum(TextureFilter, param) catch return error.InvalidEnum;
+                tex.params_dirty = true;
             },
             GL_TEXTURE_MAG_FILTER => {
                 tex.params.mag_filter = std.meta.intToEnum(TextureFilter, param) catch return error.InvalidEnum;
+                tex.params_dirty = true;
             },
             GL_TEXTURE_WRAP_S => {
                 tex.params.wrap_s = std.meta.intToEnum(TextureWrap, param) catch return error.InvalidEnum;
+                tex.params_dirty = true;
             },
             GL_TEXTURE_WRAP_T => {
                 tex.params.wrap_t = std.meta.intToEnum(TextureWrap, param) catch return error.InvalidEnum;
+                tex.params_dirty = true;
             },
             else => {}, // Ignore unknown parameters
         }
@@ -596,6 +638,126 @@ var g_texture_manager: TextureManager = TextureManager.init();
 
 pub fn globalTextureManager() *TextureManager {
     return &g_texture_manager;
+}
+
+// =============================================================================
+// GPU Upload
+// =============================================================================
+
+const webgl_backend = @import("webgl_backend.zig");
+
+/// Upload all dirty textures to the GPU
+/// Call this before rendering to ensure textures are available
+pub fn uploadDirtyTextures() void {
+    const mgr = globalTextureManager();
+
+    for (&mgr.textures.entries) |*entry| {
+        if (!entry.active) continue;
+
+        var tex = &entry.texture;
+
+        // Handle image data upload if dirty
+        if (tex.dirty) {
+            log.info("uploadDirtyTextures: found dirty texture {d}x{d}, cpu_blocks={d}", .{ tex.width, tex.height, tex.cpu_block_count });
+            if (tex.width == 0 or tex.height == 0) continue;
+            if (tex.cpu_block_count == 0 or tex.data_len == 0) continue;
+
+            // Get pixel data from CPU pool
+            const pixels = mgr.textures.cpu_pool.constSlice(.{
+                .block_start = tex.cpu_block_start,
+                .block_count = tex.cpu_block_count,
+                .size = tex.data_len,
+            });
+
+            // Destroy old backend resources if they exist
+            if (tex.backend_view.id != 0) {
+                webgl_backend.destroyTextureView(tex.backend_view);
+                tex.backend_view = .{};
+            }
+            if (tex.backend.id != 0) {
+                webgl_backend.destroyTextureImage(tex.backend);
+                tex.backend = .{};
+            }
+
+            // Log pixel data info before creating image
+            if (pixels.len >= 16) {
+                log.info("uploadDirtyTextures: pixel data len={d}, all 16 bytes: [{x},{x},{x},{x}] [{x},{x},{x},{x}] [{x},{x},{x},{x}] [{x},{x},{x},{x}]", .{
+                    pixels.len,
+                    pixels[0], pixels[1], pixels[2], pixels[3],
+                    pixels[4], pixels[5], pixels[6], pixels[7],
+                    pixels[8], pixels[9], pixels[10], pixels[11],
+                    pixels[12], pixels[13], pixels[14], pixels[15],
+                });
+            } else if (pixels.len >= 4) {
+                log.info("uploadDirtyTextures: pixel data len={d}, first 4 bytes: {x} {x} {x} {x}", .{
+                    pixels.len,
+                    pixels[0],
+                    pixels[1],
+                    pixels[2],
+                    pixels[3],
+                });
+            }
+
+            // Use the actual pixel data from CPU pool
+            const img = webgl_backend.createTextureImage(
+                tex.width,
+                tex.height,
+                tex.format,
+                tex.params,
+                pixels,
+            ) catch |err| {
+                log.info("uploadDirtyTextures: FAILED to create image: {s}", .{@errorName(err)});
+                // Failed to create image, leave dirty for retry
+                continue;
+            };
+            tex.backend = img;
+
+            // Create view for binding
+            const view = webgl_backend.createTextureView(img) catch |err| {
+                log.info("uploadDirtyTextures: FAILED to create view: {s}", .{@errorName(err)});
+                // Failed to create view, destroy image and retry later
+                webgl_backend.destroyTextureImage(img);
+                tex.backend = .{};
+                continue;
+            };
+            tex.backend_view = view;
+            log.info("uploadDirtyTextures: successfully uploaded {d}x{d} image_id={d} view_id={d} internal_format={x}", .{ tex.width, tex.height, img.id, view.id, tex.internal_format });
+
+            // Mark as clean
+            tex.dirty = false;
+            // Force sampler refresh when image changes
+            tex.params_dirty = true;
+        }
+
+        // Handle sampler creation/refresh if params changed
+        if (tex.params_dirty and tex.backend.id != 0) {
+            // Destroy old sampler if it exists
+            if (tex.backend_sampler.id != 0) {
+                webgl_backend.destroyTextureSampler(tex.backend_sampler);
+                tex.backend_sampler = .{};
+            }
+
+            // For textures without mipmaps, convert mipmap filters to non-mipmap equivalents
+            // Otherwise GL will error when sampling with mipmap filter on non-mipmapped texture
+            var params = tex.params;
+            params.min_filter = switch (params.min_filter) {
+                .nearest_mipmap_nearest, .nearest_mipmap_linear => .nearest,
+                .linear_mipmap_nearest, .linear_mipmap_linear => .linear,
+                else => params.min_filter,
+            };
+
+            // Create new sampler with adjusted params
+            tex.backend_sampler = webgl_backend.createTextureSampler(params);
+            log.info("uploadDirtyTextures: created sampler id={d} for texture {d}x{d}, min_filter={d} mag_filter={d}", .{
+                tex.backend_sampler.id,
+                tex.width,
+                tex.height,
+                @intFromEnum(params.min_filter),
+                @intFromEnum(params.mag_filter),
+            });
+            tex.params_dirty = false;
+        }
+    }
 }
 
 // =============================================================================

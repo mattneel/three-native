@@ -5,8 +5,11 @@
 const std = @import("std");
 const testing = std.testing;
 const shader = @import("webgl_shader.zig");
+const gl_uniforms = @import("gl_uniforms.zig");
 const sokol = @import("sokol");
 const sg = sokol.gfx;
+
+const log = std.log.scoped(.webgl_program);
 
 /// Internal uniform type enum that extends Sokol's UniformType with MAT2/MAT3 support.
 /// Sokol only has MAT4; we handle MAT2/MAT3 by mapping them to FLOAT4 arrays in shader descriptors.
@@ -24,7 +27,9 @@ pub const UniformType = enum(u8) {
     MAT3 = 10,
     MAT4 = 11,
 
-    /// Convert to Sokol UniformType. MAT2/MAT3 map to FLOAT4 (used with array_count).
+    /// Convert to Sokol UniformType.
+    /// Note: Sokol only has FLOAT, FLOAT2, FLOAT3, FLOAT4, INT, INT2, INT3, INT4, MAT4
+    /// For mat2/mat3, we keep them as single units since that's how WebGL GLSL defines them.
     pub fn toSokol(self: UniformType) sg.UniformType {
         return switch (self) {
             .INVALID => .INVALID,
@@ -36,18 +41,24 @@ pub const UniformType = enum(u8) {
             .INT2 => .INT2,
             .INT3 => .INT3,
             .INT4 => .INT4,
-            .MAT2 => .FLOAT4, // 2 columns of vec4 in std140
-            .MAT3 => .FLOAT4, // 3 columns of vec4 in std140
+            // Note: Sokol doesn't have MAT2/MAT3, but we use FLOAT4 as a placeholder
+            // The actual uniform setting is handled separately by WebGL-style calls
+            .MAT2 => .FLOAT4,
+            .MAT3 => .FLOAT4,
             .MAT4 => .MAT4,
         };
     }
 
-    /// Get the effective array count for Sokol. MAT2 becomes FLOAT4[2], MAT3 becomes FLOAT4[3].
+    /// Get the effective array count for Sokol shader descriptor size validation.
+    /// MAT2 becomes FLOAT4[2] (32 bytes), MAT3 becomes FLOAT4[3] (48 bytes).
+    /// This ensures the glsl_uniform sizes sum to the uniform block size.
+    /// Note: We use dummy names for MAT2/MAT3 so Sokol doesn't try to set them;
+    /// they are set via direct GL calls instead.
     pub fn sokolArrayCount(self: UniformType, array_count: u16) u16 {
         const base: u16 = if (array_count == 0) 1 else array_count;
         return switch (self) {
-            .MAT2 => base * 2,
-            .MAT3 => base * 3,
+            .MAT2 => base * 2, // 2 columns of vec4
+            .MAT3 => base * 3, // 3 columns of vec4
             else => base,
         };
     }
@@ -106,7 +117,22 @@ const SamplerEntry = struct {
     stage: UniformStage,
     array_count: u16,
     units: [MaxUniformArrayCount]i32,
+    gl_location: i32, // Cached GL uniform location (-1 if not found)
+    dirty: bool, // True if unit needs to be set via glUniform1i
 };
+
+/// Tracks mat2/mat3 uniforms that need direct GL calls (Sokol only supports mat4).
+const MatrixUniform = struct {
+    name_len: u8,
+    name_bytes: [MaxUniformNameBytes]u8,
+    utype: UniformType, // MAT2 or MAT3
+    stage: UniformStage,
+    offset: u32, // Offset in the uniform block buffer
+    gl_location: i32, // GL uniform location (-1 if not found)
+    array_count: u16,
+};
+
+pub const MaxMatrixUniforms: usize = 16;
 
 pub const Program = struct {
     id: ProgramId,
@@ -128,6 +154,11 @@ pub const Program = struct {
     sampler_count: u8,
     samplers: [MaxProgramSamplers]SamplerEntry,
     link_version: u32,
+    /// Mat2/mat3 uniforms that need direct GL calls (Sokol only supports mat4)
+    mat_uniform_count: u8,
+    mat_uniforms: [MaxMatrixUniforms]MatrixUniform,
+    /// GL program ID for direct GL uniform calls
+    gl_program: u32,
 
     /// Count the union of VS and FS uniforms (no duplicates).
     pub fn countUniformUnion(self: *const Program) u32 {
@@ -215,6 +246,20 @@ fn emptySamplerEntry() SamplerEntry {
         .stage = .vertex,
         .array_count = 1,
         .units = [_]i32{0} ** MaxUniformArrayCount,
+        .gl_location = -1,
+        .dirty = false,
+    };
+}
+
+fn emptyMatrixUniform() MatrixUniform {
+    return .{
+        .name_len = 0,
+        .name_bytes = [_]u8{0} ** MaxUniformNameBytes,
+        .utype = .INVALID,
+        .stage = .vertex,
+        .offset = 0,
+        .gl_location = -1,
+        .array_count = 0,
     };
 }
 
@@ -263,6 +308,9 @@ pub const ProgramTable = struct {
                     .sampler_count = 0,
                     .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
                     .link_version = 0,
+                    .mat_uniform_count = 0,
+                    .mat_uniforms = [_]MatrixUniform{emptyMatrixUniform()} ** MaxMatrixUniforms,
+                    .gl_program = 0,
                 },
             };
         }
@@ -301,6 +349,9 @@ pub const ProgramTable = struct {
                     .sampler_count = 0,
                     .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
                     .link_version = 0,
+                    .mat_uniform_count = 0,
+                    .mat_uniforms = [_]MatrixUniform{emptyMatrixUniform()} ** MaxMatrixUniforms,
+                    .gl_program = 0,
                 };
                 entry.active = true;
                 self.count += 1;
@@ -489,6 +540,13 @@ pub const ProgramTable = struct {
         };
         entry.program.fragment_source_len = fs_len;
 
+        // Debug: Check if fragment shader samples from texture
+        const fs_src = entry.program.fragment_source[0..@as(usize, fs_len)];
+        const has_texture = std.mem.indexOf(u8, fs_src, "texture(") != null or
+            std.mem.indexOf(u8, fs_src, "texture2D(") != null;
+        const has_map = std.mem.indexOf(u8, fs_src, "map") != null;
+        log.info("linkProgram: FS len={d} has_texture={} has_map={}", .{ fs_len, has_texture, has_map });
+
         // Store only the uniforms that were in each stage's original source
         // AND are actually used in the shader body (not just declared).
         var vs_filtered: [MaxProgramUniforms]UniformDecl = undefined;
@@ -545,6 +603,12 @@ pub const ProgramTable = struct {
             return;
         }
 
+        // Reset dummy name counter before building shader descriptor
+        dummy_name_count = 0;
+
+        // Collect mat2/mat3 uniforms before shader creation
+        self.collectMatrixUniforms(entry);
+
         const desc = buildShaderDesc(entry);
         const shd = sg.makeShader(desc);
         entry.program.backend_shader = shd;
@@ -554,6 +618,11 @@ pub const ProgramTable = struct {
             try self.setInfoLog(entry, "backend shader compile failed");
             return;
         }
+
+        // Query GL program ID and look up mat2/mat3 uniform locations
+        const gl_info = sg.glQueryShaderInfo(shd);
+        entry.program.gl_program = gl_info.prog;
+        self.lookupMatrixUniformLocations(entry);
 
         entry.program.linked = true;
     }
@@ -682,6 +751,9 @@ pub const ProgramTable = struct {
             .sampler_count = 0,
             .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
             .link_version = 0,
+            .mat_uniform_count = 0,
+            .mat_uniforms = [_]MatrixUniform{emptyMatrixUniform()} ** MaxMatrixUniforms,
+            .gl_program = 0,
         };
         self.count -= 1;
         return true;
@@ -701,12 +773,131 @@ pub const ProgramTable = struct {
         self.* = Self.init();
     }
 
-    fn setInfoLog(self: *Self, entry: *Entry, log: []const u8) !void {
-        if (log.len > MaxProgramInfoLogBytes) return error.TooLarge;
+    /// Apply mat2/mat3 uniforms via direct GL calls.
+    /// Call this after sg.applyUniforms to set the matrix uniforms that Sokol can't handle.
+    /// Returns true if any uniforms were applied.
+    pub fn applyMatrixUniforms(self: *Self, id: ProgramId) bool {
+        const prog = self.get(id) orelse return false;
+        if (prog.mat_uniform_count == 0) return false;
+        if (prog.gl_program == 0) return false;
+
+        if (!gl_uniforms.isAvailable()) return false;
+
+        var applied: u32 = 0;
+        const mat_count: usize = @intCast(prog.mat_uniform_count);
+        for (prog.mat_uniforms[0..mat_count]) |mat| {
+            if (mat.gl_location < 0) continue;
+
+            // Get the data from the appropriate uniform block
+            const block = if (mat.stage == .vertex) &prog.vs_uniforms else &prog.fs_uniforms;
+            if (block.size == 0) continue;
+
+            const offset: usize = @intCast(mat.offset);
+            const block_size: usize = @intCast(block.size);
+            if (offset >= block_size) continue;
+
+            // Mat3 in std140 is stored as 3 vec4 columns (48 bytes), but glUniformMatrix3fv
+            // expects packed 9 floats. We need to extract the 3x3 from the padded layout.
+            const array_count: i32 = if (mat.array_count == 0) 1 else @intCast(mat.array_count);
+
+            switch (mat.utype) {
+                .MAT2 => {
+                    // Mat2 in std140: 2 vec4 columns (32 bytes) -> extract 2x2 (16 bytes)
+                    var mat_data: [4]f32 = undefined;
+                    const src = block.buffer[offset..];
+                    // Column 0: floats 0,1 from vec4 at offset 0
+                    mat_data[0] = @bitCast(src[0..4].*);
+                    mat_data[1] = @bitCast(src[4..8].*);
+                    // Column 1: floats 0,1 from vec4 at offset 16
+                    mat_data[2] = @bitCast(src[16..20].*);
+                    mat_data[3] = @bitCast(src[20..24].*);
+                    gl_uniforms.uniformMatrix2fv(mat.gl_location, array_count, false, &mat_data);
+                },
+                .MAT3 => {
+                    // Mat3 in std140: 3 vec4 columns (48 bytes) -> extract 3x3 (36 bytes)
+                    var mat_data: [9]f32 = undefined;
+                    const src = block.buffer[offset..];
+                    // Column 0: floats 0,1,2 from vec4 at offset 0
+                    mat_data[0] = @bitCast(src[0..4].*);
+                    mat_data[1] = @bitCast(src[4..8].*);
+                    mat_data[2] = @bitCast(src[8..12].*);
+                    // Column 1: floats 0,1,2 from vec4 at offset 16
+                    mat_data[3] = @bitCast(src[16..20].*);
+                    mat_data[4] = @bitCast(src[20..24].*);
+                    mat_data[5] = @bitCast(src[24..28].*);
+                    // Column 2: floats 0,1,2 from vec4 at offset 32
+                    mat_data[6] = @bitCast(src[32..36].*);
+                    mat_data[7] = @bitCast(src[36..40].*);
+                    mat_data[8] = @bitCast(src[40..44].*);
+                    const name = mat.name_bytes[0..@as(usize, mat.name_len)];
+                    log.info("applyMatrixUniforms MAT3 '{s}' gl_loc={d} offset={d} data=[{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3}]", .{
+                        name, mat.gl_location, offset,
+                        mat_data[0], mat_data[1], mat_data[2],
+                        mat_data[3], mat_data[4], mat_data[5],
+                        mat_data[6], mat_data[7], mat_data[8],
+                    });
+                    gl_uniforms.uniformMatrix3fv(mat.gl_location, array_count, false, &mat_data);
+                },
+                else => continue,
+            }
+            applied += 1;
+        }
+
+        if (applied > 0) {
+            log.debug("applyMatrixUniforms: applied {d} uniforms", .{applied});
+        }
+        return applied > 0;
+    }
+
+    /// Apply sampler uniforms via direct GL calls (sets texture unit for each sampler).
+    /// Call this at draw time when the program is active.
+    pub fn applySamplerUniforms(self: *Self, id: ProgramId) bool {
+        const entry = &self.entries[id.index];
+        const prog = &entry.program;
+        if (prog.sampler_count == 0) return false;
+        if (prog.gl_program == 0) return false;
+        if (!gl_uniforms.isAvailable()) return false;
+
+        // Verify the correct program is bound
+        const current_prog = gl_uniforms.getCurrentProgram();
+        if (current_prog != prog.gl_program) {
+            log.warn("applySamplerUniforms: program mismatch! current={d} expected={d}", .{ current_prog, prog.gl_program });
+        }
+
+        var applied: u32 = 0;
+        const count: usize = @intCast(prog.sampler_count);
+        for (prog.samplers[0..count]) |*sampler| {
+            if (!sampler.dirty) continue;
+            if (sampler.name_len == 0) continue;
+
+            // Look up GL location if not cached
+            if (sampler.gl_location < 0) {
+                const name_ptr: [*:0]const u8 = @ptrCast(sampler.name_bytes[0..].ptr);
+                sampler.gl_location = gl_uniforms.getUniformLocation(prog.gl_program, name_ptr);
+            }
+
+            if (sampler.gl_location >= 0) {
+                gl_uniforms.uniform1i(sampler.gl_location, sampler.units[0]);
+                log.info("applySamplerUniforms: '{s}' gl_loc={d} unit={d} (gl_program={d})", .{
+                    sampler.name_bytes[0..@as(usize, sampler.name_len)],
+                    sampler.gl_location,
+                    sampler.units[0],
+                    prog.gl_program,
+                });
+                applied += 1;
+            }
+            sampler.dirty = false;
+        }
+
+        return applied > 0;
+    }
+
+    fn setInfoLog(self: *Self, entry: *Entry, log_msg: []const u8) !void {
+        if (log_msg.len > MaxProgramInfoLogBytes) return error.TooLarge;
         self.clearInfoLog(entry);
-        if (log.len == 0) return;
-        @memcpy(entry.program.info_log_bytes[0..log.len], log);
-        entry.program.info_log_len = @intCast(log.len);
+        if (log_msg.len == 0) return;
+        @memcpy(entry.program.info_log_bytes[0..log_msg.len], log_msg);
+        entry.program.info_log_len = @intCast(log_msg.len);
     }
 
     fn clearInfoLog(self: *Self, entry: *Entry) void {
@@ -838,6 +1029,92 @@ pub const ProgramTable = struct {
         }
     }
 
+    /// Collect mat2/mat3 uniforms from both VS and FS uniform blocks
+    fn collectMatrixUniforms(self: *Self, entry: *Entry) void {
+        _ = self;
+        entry.program.mat_uniform_count = 0;
+
+        // Collect from vertex shader uniforms
+        const vs_count: usize = @intCast(entry.program.vs_uniforms.count);
+        for (entry.program.vs_uniforms.items[0..vs_count]) |item| {
+            if (item.name_len == 0) continue;
+            if (item.utype == .MAT2 or item.utype == .MAT3) {
+                if (entry.program.mat_uniform_count >= MaxMatrixUniforms) break;
+                const idx: usize = @intCast(entry.program.mat_uniform_count);
+                entry.program.mat_uniforms[idx] = .{
+                    .name_len = item.name_len,
+                    .name_bytes = item.name_bytes,
+                    .utype = item.utype,
+                    .stage = .vertex,
+                    .offset = item.offset,
+                    .gl_location = -1,
+                    .array_count = item.array_count,
+                };
+                entry.program.mat_uniform_count += 1;
+            }
+        }
+
+        // Collect from fragment shader uniforms
+        const fs_count: usize = @intCast(entry.program.fs_uniforms.count);
+        for (entry.program.fs_uniforms.items[0..fs_count]) |item| {
+            if (item.name_len == 0) continue;
+            if (item.utype == .MAT2 or item.utype == .MAT3) {
+                // Check if already collected from VS (shared uniform)
+                const name = item.name_bytes[0..@as(usize, item.name_len)];
+                var already_collected = false;
+                const mat_count: usize = @intCast(entry.program.mat_uniform_count);
+                for (entry.program.mat_uniforms[0..mat_count]) |mat| {
+                    const mat_name = mat.name_bytes[0..@as(usize, mat.name_len)];
+                    if (std.mem.eql(u8, name, mat_name)) {
+                        already_collected = true;
+                        break;
+                    }
+                }
+                if (already_collected) continue;
+
+                if (entry.program.mat_uniform_count >= MaxMatrixUniforms) break;
+                const idx: usize = @intCast(entry.program.mat_uniform_count);
+                entry.program.mat_uniforms[idx] = .{
+                    .name_len = item.name_len,
+                    .name_bytes = item.name_bytes,
+                    .utype = item.utype,
+                    .stage = .fragment,
+                    .offset = item.offset,
+                    .gl_location = -1,
+                    .array_count = item.array_count,
+                };
+                entry.program.mat_uniform_count += 1;
+            }
+        }
+
+        if (entry.program.mat_uniform_count > 0) {
+            log.info("collectMatrixUniforms: found {d} mat2/mat3 uniforms", .{entry.program.mat_uniform_count});
+        }
+    }
+
+    /// Look up GL uniform locations for mat2/mat3 uniforms using direct GL calls
+    fn lookupMatrixUniformLocations(self: *Self, entry: *Entry) void {
+        _ = self;
+        if (entry.program.gl_program == 0) return;
+        if (entry.program.mat_uniform_count == 0) return;
+
+        // Initialize GL if needed
+        gl_uniforms.init();
+        if (!gl_uniforms.isAvailable()) {
+            log.warn("lookupMatrixUniformLocations: GL not available", .{});
+            return;
+        }
+
+        const mat_count: usize = @intCast(entry.program.mat_uniform_count);
+        for (entry.program.mat_uniforms[0..mat_count]) |*mat| {
+            // The name_bytes should be null-terminated
+            const name_ptr: [*:0]const u8 = @ptrCast(mat.name_bytes[0..].ptr);
+            mat.gl_location = gl_uniforms.getUniformLocation(entry.program.gl_program, name_ptr);
+            const name = mat.name_bytes[0..@as(usize, mat.name_len)];
+            log.info("lookupMatrixUniformLocations: '{s}' -> gl_loc={d}", .{ name, mat.gl_location });
+        }
+    }
+
     fn storeUniforms(self: *Self, entry: *Entry, stage: UniformStage, decls: []UniformDecl, block_size: u32) !void {
         _ = self;
         _ = block_size; // Recompute instead of using passed-in size
@@ -874,6 +1151,13 @@ pub const ProgramTable = struct {
             const size: usize = @intCast(block.size);
             @memset(block.buffer[0..size], 0);
         }
+
+        // Debug: log stored uniforms
+        const stage_name = if (stage == .vertex) "VS" else "FS";
+        log.info("storeUniforms {s}: {d} uniforms, size={d}", .{ stage_name, decls.len, computed_size });
+        for (decls, 0..) |decl, idx| {
+            log.info("  [{d}] '{s}' type={s} offset={d}", .{ idx, decl.name, @tagName(decl.utype), block.items[idx].offset });
+        }
     }
 
     fn storeSamplers(self: *Self, entry: *Entry, stage: UniformStage, decls: []SamplerDecl) !void {
@@ -909,9 +1193,19 @@ pub const ProgramTable = struct {
         }
         applyUniformBlock(&desc, 0, .VERTEX, &entry.program.vs_uniforms);
         applyUniformBlock(&desc, 1, .FRAGMENT, &entry.program.fs_uniforms);
+
+        // Note: For the GL backend, we don't declare samplers in the shader descriptor.
+        // GL handles sampler->texture unit binding natively via uniform1i calls.
+        // If we declare samplers here, Sokol validates that bindings exist for ALL declared
+        // samplers, but Three.js shaders often have unused samplers that get optimized out.
+
         return desc;
     }
 };
+
+/// Dummy name buffers for MAT2/MAT3 uniforms (static to persist past function return)
+var dummy_name_buffers: [16][MaxUniformNameBytes + 16]u8 = undefined;
+var dummy_name_count: usize = 0;
 
 fn applyUniformBlock(desc: *sg.ShaderDesc, index: usize, stage: sg.ShaderStage, block: *const UniformBlock) void {
     if (block.count == 0 or block.size == 0) return;
@@ -926,12 +1220,31 @@ fn applyUniformBlock(desc: *sg.ShaderDesc, index: usize, stage: sg.ShaderStage, 
         const item = &block.items[idx];
         if (item.name_len == 0) continue;
         const count: u16 = if (item.array_count == 0) 1 else item.array_count;
-        // Convert our internal UniformType to Sokol's type
-        // MAT2/MAT3 map to FLOAT4 with adjusted array_count
+        // For MAT2/MAT3, use a dummy name so Sokol skips setting them
+        // (they will be set via direct GL calls). The dummy name ensures
+        // glGetUniformLocation returns -1, causing Sokol to skip.
+        // For MAT2/MAT3, use a dummy name so Sokol skips setting them
+        // (they will be set via direct GL calls). The dummy name ensures
+        // glGetUniformLocation returns -1, causing Sokol to skip.
+        const glsl_name: [*:0]const u8 = if (item.utype == .MAT2 or item.utype == .MAT3) blk: {
+            if (dummy_name_count >= dummy_name_buffers.len) {
+                // Fall back to real name if too many (shouldn't happen)
+                break :blk @ptrCast(item.name_bytes[0..].ptr);
+            }
+            const name = item.name_bytes[0..@as(usize, item.name_len)];
+            const prefix = "_sokol_skip_";
+            var buf = &dummy_name_buffers[dummy_name_count];
+            @memcpy(buf[0..prefix.len], prefix);
+            @memcpy(buf[prefix.len..][0..name.len], name);
+            buf[prefix.len + name.len] = 0;
+            dummy_name_count += 1;
+            break :blk @ptrCast(buf[0..].ptr);
+        } else @ptrCast(item.name_bytes[0..].ptr);
+
         desc.uniform_blocks[index].glsl_uniforms[out_idx] = .{
             .type = item.utype.toSokol(),
             .array_count = item.utype.sokolArrayCount(count),
-            .glsl_name = item.name_bytes[0..].ptr,
+            .glsl_name = glsl_name,
         };
         out_idx += 1;
     }
@@ -1097,6 +1410,9 @@ fn setSamplerUnits(entry: *Program, index: u8, values: []const i32) !void {
     for (0..count) |i| {
         sampler.units[i] = values[i];
     }
+    // Mark sampler as dirty - actual GL uniform1i will be called at draw time
+    // when the program is guaranteed to be active
+    sampler.dirty = true;
 }
 
 const ShaderStage = enum { vertex, fragment };
@@ -1683,8 +1999,8 @@ test "ProgramTable link fails without fragment shader" {
 
     const prog = programs.get(pid) orelse return error.UnexpectedNull;
     try testing.expect(!prog.linked);
-    const log = programs.getInfoLog(pid) orelse return error.UnexpectedNull;
-    try testing.expect(log.len > 0);
+    const info_log = programs.getInfoLog(pid) orelse return error.UnexpectedNull;
+    try testing.expect(info_log.len > 0);
 }
 
 test "ProgramTable link fails when shader not compiled" {
@@ -1707,8 +2023,8 @@ test "ProgramTable link fails when shader not compiled" {
 
     const prog = programs.get(pid) orelse return error.UnexpectedNull;
     try testing.expect(!prog.linked);
-    const log = programs.getInfoLog(pid) orelse return error.UnexpectedNull;
-    try testing.expect(log.len > 0);
+    const info_log = programs.getInfoLog(pid) orelse return error.UnexpectedNull;
+    try testing.expect(info_log.len > 0);
 }
 
 test "ProgramTable uniforms store data" {

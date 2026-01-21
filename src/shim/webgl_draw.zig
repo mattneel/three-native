@@ -11,6 +11,7 @@ const webgl = @import("webgl.zig");
 const webgl_state = @import("webgl_state.zig");
 const webgl_program = @import("webgl_program.zig");
 const webgl_texture = @import("webgl_texture.zig");
+const gl_uniforms = @import("gl_uniforms.zig");
 
 // Scoped logger for draw queue debug tracing
 const log = std.log.scoped(.webgl_draw);
@@ -631,6 +632,9 @@ pub fn flush() void {
     defer g_state.command_count = 0;
     if (!sg.isvalid()) return;
 
+    // Upload any dirty textures to GPU before drawing
+    webgl_texture.uploadDirtyTextures();
+
     const mgr = webgl_state.globalBufferManager();
     const programs = webgl_program.globalProgramTable();
 
@@ -764,43 +768,98 @@ pub fn flush() void {
             }
         }
 
-        // Bind textures from captured state
-        // Note: Texture views will be populated when T3 (Image Loading) creates backend resources
+        // Note: Texture binding is done via direct GL calls after applyBindings
+        // We don't use Sokol's view/sampler system since we removed sampler declarations from shader desc
         const tex_mgr = webgl_texture.globalTextureManager();
-        for (cmd.bound_textures_2d, 0..) |maybe_tex_id, unit| {
-            if (maybe_tex_id) |tex_id| {
-                if (tex_mgr.textures.get(tex_id)) |tex| {
-                    // Bind texture view if valid (T3 will populate backend_view)
-                    if (tex.backend_view.id != 0) {
-                        bindings.views[unit] = tex.backend_view;
-                    }
-                }
-            }
-            // For null/invalid handles, bindings.views[unit] remains default (empty)
-        }
 
         const key = pipelineKey(prog.backend_shader.id, &pip_desc);
         const pip = getCachedPipeline(key, pip_desc) orelse continue;
+        log.debug("flush: cmd {d}: shader={d} pip.id={d} depth={any} cull={any}", .{ cmd_idx, prog.backend_shader.id, pip.id, cmd.depth_enabled, cmd.cull_enabled });
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
-        log.debug("flush: vs_uniforms.size={d} fs_uniforms.size={d}", .{ prog.vs_uniforms.size, prog.fs_uniforms.size });
         if (prog.vs_uniforms.size > 0) {
             const size = @as(usize, prog.vs_uniforms.size);
             const slice = prog.vs_uniforms.buffer[0..size];
-            log.debug("flush: applying VS uniforms, size={d}", .{size});
             sg.applyUniforms(0, .{ .ptr = slice.ptr, .size = slice.len });
         }
         if (prog.fs_uniforms.size > 0) {
             const size = @as(usize, prog.fs_uniforms.size);
             const slice = prog.fs_uniforms.buffer[0..size];
-            log.debug("flush: applying FS uniforms, size={d}", .{size});
             sg.applyUniforms(1, .{ .ptr = slice.ptr, .size = slice.len });
+
+            // Also apply FS uniforms via direct GL calls since Sokol uniform blocks
+            // don't work with Three.js's individual uniform declarations
+            if (prog.gl_program != 0 and gl_uniforms.isAvailable()) {
+                // Apply diffuse (vec3 at offset 0)
+                if (slice.len >= 12) {
+                    const diffuse_loc = gl_uniforms.getUniformLocation(prog.gl_program, "diffuse");
+                    if (diffuse_loc >= 0) {
+                        const f_data = [_]f32{
+                            @bitCast([4]u8{ slice[0], slice[1], slice[2], slice[3] }),
+                            @bitCast([4]u8{ slice[4], slice[5], slice[6], slice[7] }),
+                            @bitCast([4]u8{ slice[8], slice[9], slice[10], slice[11] }),
+                        };
+                        gl_uniforms.uniform3fv(diffuse_loc, 1, &f_data);
+                    }
+                }
+                // Apply opacity (float at offset 16)
+                if (slice.len >= 20) {
+                    const opacity_loc = gl_uniforms.getUniformLocation(prog.gl_program, "opacity");
+                    if (opacity_loc >= 0) {
+                        const opacity: f32 = @bitCast([4]u8{ slice[16], slice[17], slice[18], slice[19] });
+                        gl_uniforms.uniform1f(opacity_loc, opacity);
+                    }
+                }
+            }
         }
+        // Apply mat2/mat3 uniforms via direct GL calls (Sokol only supports mat4)
+        if (programs.applyMatrixUniforms(cmd.program)) {
+            log.debug("flush: cmd {d}: applyMatrixUniforms done", .{cmd_idx});
+        }
+
+        // Apply sampler uniforms via direct GL calls (sets texture unit for each sampler)
+        _ = programs.applySamplerUniforms(cmd.program);
+
+        // Bind textures via direct GL calls (since we don't declare them in Sokol shader descriptor)
+        for (cmd.bound_textures_2d, 0..) |maybe_tex_id, unit| {
+            if (maybe_tex_id) |tex_id| {
+                if (tex_mgr.textures.get(tex_id)) |tex| {
+                    // Get GL texture ID from Sokol image (not view)
+                    if (tex.backend.id != 0) {
+                        const img_info = sg.glQueryImageInfo(tex.backend);
+                        const gl_tex = img_info.tex[0];
+                        log.debug("flush: cmd {d}: unit {d} sokol_img={d} gl_tex={d} {d}x{d}", .{
+                            cmd_idx, unit, tex.backend.id, gl_tex, tex.width, tex.height,
+                        });
+                        if (gl_tex != 0) {
+                            gl_uniforms.activeTexture(@intCast(unit));
+                            gl_uniforms.bindTexture(gl_uniforms.GL_TEXTURE_2D, gl_tex);
+                            log.debug("flush: cmd {d}: GL bind unit {d} tex={d}", .{ cmd_idx, unit, gl_tex });
+                        }
+                    }
+                    // Bind sampler if we have one
+                    if (tex.backend_sampler.id != 0) {
+                        const sampler_info = sg.glQuerySamplerInfo(tex.backend_sampler);
+                        log.debug("flush: cmd {d}: unit {d} sokol_sampler={d} gl_sampler={d}", .{
+                            cmd_idx, unit, tex.backend_sampler.id, sampler_info.smp,
+                        });
+                        if (sampler_info.smp != 0) {
+                            gl_uniforms.bindSampler(@intCast(unit), sampler_info.smp);
+                        }
+                    }
+                }
+            }
+        }
+        // Check for GL errors after texture binding
+        const gl_err = gl_uniforms.getError();
+        if (gl_err != gl_uniforms.GL_NO_ERROR) {
+            log.err("flush: cmd {d}: GL error after texture binding: {x}", .{ cmd_idx, gl_err });
+        }
+
         const base = if (cmd.kind == .arrays) cmd.first else 0;
         const base_u32: u32 = if (base < 0) 0 else @intCast(base);
         const count_u32: u32 = if (cmd.count < 0) 0 else @intCast(cmd.count);
         if (count_u32 == 0) continue;
-        log.debug("flush: sg.draw base={d} count={d} kind={s}", .{ base_u32, count_u32, @tagName(cmd.kind) });
         sg.draw(base_u32, count_u32, 1);
     }
 }

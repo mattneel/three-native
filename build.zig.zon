@@ -35,6 +35,10 @@
         .sokol = .{
             .path = "deps/sokol-zig",
         },
+        .zignal = .{
+            .url = "git+https://github.com/bfactory-ai/zignal?ref=0.5.0#a9bb03d7cf7dc57254be4f7501992a5931680816",
+            .hash = "zignal-0.5.0-OrZ3s0OqFQAiAAEWKsBbFCrXWzGpyqJkgV7uFhgcmRHz",
+        },
     },
     .paths = .{
         "build.zig",

@@ -19,6 +19,8 @@ pub const webgl_backend = @import("shim/webgl_backend.zig");
 pub const webgl_shader = @import("shim/webgl_shader.zig");
 pub const webgl_program = @import("shim/webgl_program.zig");
 pub const webgl_draw = @import("shim/webgl_draw.zig");
+pub const webgl_texture = @import("shim/webgl_texture.zig");
+pub const image_loader = @import("shim/image_loader.zig");
 
 // Re-export main types for convenience
 pub const Window = window.Window;

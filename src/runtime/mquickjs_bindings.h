@@ -17,6 +17,9 @@ JSValue js_dom_noop(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_dom_createElement(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_dom_createElementNS(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_dom_getContext(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_Image(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_loadImage(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_freeImage(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_createBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_deleteBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_bindBuffer(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
@@ -76,6 +79,7 @@ JSValue js_gl_bindTexture(JSContext *ctx, JSValue *this_val, int argc, JSValue *
 JSValue js_gl_texParameteri(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_texImage2D(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_texSubImage2D(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue js_gl_texStorage2D(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_texImage3D(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_texSubImage3D(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gl_generateMipmap(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);

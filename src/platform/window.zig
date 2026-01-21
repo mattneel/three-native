@@ -89,6 +89,14 @@ fn sokolInit() callconv(.c) void {
         .logger = .{ .func = slog.func },
     });
 
+    // Query and log features
+    const features = sgfx.queryFeatures();
+    std.debug.print("[window] Sokol features: image_clamp_to_border={}, mrt_independent_blend_state={}, mrt_independent_write_mask={}\n", .{
+        features.image_clamp_to_border,
+        features.mrt_independent_blend_state,
+        features.mrt_independent_write_mask,
+    });
+
     // Wire WebGL buffer backend to sokol
     webgl_state.globalBufferManager().setBackend(webgl_backend.getSokolBackend()) catch |err| {
         std.debug.print("[window] buffer backfill failed: {}\n", .{err});

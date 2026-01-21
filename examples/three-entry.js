@@ -5,6 +5,9 @@ import {
   BoxGeometry,
   MeshBasicMaterial,
   Mesh,
+  Texture,
+  TextureLoader,
+  SRGBColorSpace,
 } from "../deps/three/build/three.module.js";
 
 export {
@@ -14,4 +17,7 @@ export {
   BoxGeometry,
   MeshBasicMaterial,
   Mesh,
+  Texture,
+  TextureLoader,
+  SRGBColorSpace,
 };

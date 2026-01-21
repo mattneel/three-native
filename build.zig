@@ -97,6 +97,14 @@ pub fn build(b: *std.Build) void {
     mquickjs_lib.linkLibC();
 
     // ==========================================================================
+    // Zignal dependency (image processing)
+    // ==========================================================================
+    const zignal_dep = b.dependency("zignal", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ==========================================================================
     // Library module (for tests and reuse)
     // ==========================================================================
     const mod = b.addModule("three_native", .{
@@ -105,6 +113,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "sokol", .module = sokol_dep.module("sokol") },
+            .{ .name = "zignal", .module = zignal_dep.module("zignal") },
         },
     });
     mod.linkLibrary(sokol_dep.artifact("sokol_clib"));
@@ -126,6 +135,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "three_native", .module = mod },
                 .{ .name = "sokol", .module = sokol_dep.module("sokol") },
+                .{ .name = "zignal", .module = zignal_dep.module("zignal") },
             },
         }),
     });
