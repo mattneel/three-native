@@ -15,7 +15,7 @@ function init() {
   scene = new THREE.Scene();
 
   // Use TextureLoader like the real Three.js example
-  var texture = new THREE.TextureLoader().load('deps/three/examples/textures/crate.gif');
+  var texture = new THREE.TextureLoader().load('examples/crate.png');
   texture.colorSpace = THREE.SRGBColorSpace;
 
   var geometry = new THREE.BoxGeometry();
