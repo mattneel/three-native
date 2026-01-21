@@ -104,13 +104,18 @@ const CpuSlice = struct {
 };
 
 const CpuTexturePool = struct {
-    data: [CpuPoolBytes]u8 = undefined,
-    used: [CpuBlockCount]bool = [_]bool{false} ** CpuBlockCount,
+    data: [CpuPoolBytes]u8,
+    used: [CpuBlockCount]bool,
 
     const Self = @This();
 
+    fn initInPlace(self: *Self) void {
+        @memset(&self.used, false);
+        // data is left uninitialized - it will be written before read
+    }
+
     fn reset(self: *Self) void {
-        @memset(self.used[0..], false);
+        @memset(&self.used, false);
     }
 
     fn alloc(self: *Self, size: usize) !CpuSlice {
@@ -162,7 +167,16 @@ const CpuTexturePool = struct {
     }
 };
 
-var g_cpu_pool: CpuTexturePool = CpuTexturePool{};
+var g_cpu_pool: CpuTexturePool = undefined;
+var g_cpu_pool_init: bool = false;
+
+fn globalCpuPool() *CpuTexturePool {
+    if (!g_cpu_pool_init) {
+        g_cpu_pool.initInPlace();
+        g_cpu_pool_init = true;
+    }
+    return &g_cpu_pool;
+}
 
 // =============================================================================
 // Texture Table
@@ -181,37 +195,23 @@ pub const TextureTable = struct {
         texture: Texture,
     };
 
-    pub fn init() Self {
-        var entries: [MaxTextures]Entry = undefined;
-        for (&entries, 0..) |*entry, idx| {
-            entry.* = .{
-                .active = false,
-                .generation = 1,
-                .texture = .{
-                    .id = .{ .index = @intCast(idx), .generation = 0 },
-                    .target = .texture_2d,
-                    .width = 0,
-                    .height = 0,
-                    .format = .rgba,
-                    .internal_format = 0x1908, // GL_RGBA
-                    .pixel_type = 0x1401, // GL_UNSIGNED_BYTE
-                    .data_len = 0,
-                    .params = .{},
-                    .backend = .{},
-                    .backend_view = .{},
-                    .backend_sampler = .{},
-                    .cpu_block_start = 0,
-                    .cpu_block_count = 0,
-                    .dirty = false,
-                    .params_dirty = false,
-                },
-            };
+    /// Initialize table in place - zeros memory at runtime, no comptime cost
+    pub fn initInPlace(self: *Self) void {
+        @memset(std.mem.asBytes(&self.entries), 0);
+        for (&self.entries, 0..) |*entry, idx| {
+            entry.generation = 1;
+            entry.texture.id.index = @intCast(idx);
+            entry.texture.internal_format = 0x1908; // GL_RGBA
+            entry.texture.pixel_type = 0x1401; // GL_UNSIGNED_BYTE
         }
-        return .{
-            .entries = entries,
-            .count = 0,
-            .cpu_pool = &g_cpu_pool,
-        };
+        self.count = 0;
+        self.cpu_pool = globalCpuPool();
+    }
+
+    pub fn init() Self {
+        var self: Self = undefined;
+        self.initInPlace();
+        return self;
     }
 
     pub fn reset(self: *Self) void {
@@ -481,11 +481,23 @@ pub const TextureTable = struct {
 // =============================================================================
 
 pub const TextureState = struct {
-    active_unit: u32 = 0,
-    bound_2d: [MaxTextureUnits]?TextureId = [_]?TextureId{null} ** MaxTextureUnits,
-    bound_cube: [MaxTextureUnits]?TextureId = [_]?TextureId{null} ** MaxTextureUnits,
+    active_unit: u32,
+    bound_2d: [MaxTextureUnits]?TextureId,
+    bound_cube: [MaxTextureUnits]?TextureId,
 
     const Self = @This();
+
+    pub fn initInPlace(self: *Self) void {
+        self.active_unit = 0;
+        @memset(&self.bound_2d, null);
+        @memset(&self.bound_cube, null);
+    }
+
+    pub fn init() Self {
+        var self: Self = undefined;
+        self.initInPlace();
+        return self;
+    }
 
     pub fn setActiveUnit(self: *Self, unit: u32) !void {
         if (unit >= MaxTextureUnits) return error.InvalidUnit;
@@ -532,9 +544,7 @@ pub const TextureState = struct {
     }
 
     pub fn reset(self: *Self) void {
-        self.active_unit = 0;
-        self.bound_2d = [_]?TextureId{null} ** MaxTextureUnits;
-        self.bound_cube = [_]?TextureId{null} ** MaxTextureUnits;
+        self.initInPlace();
     }
 };
 
@@ -548,11 +558,15 @@ pub const TextureManager = struct {
 
     const Self = @This();
 
+    pub fn initInPlace(self: *Self) void {
+        self.textures.initInPlace();
+        self.state.initInPlace();
+    }
+
     pub fn init() Self {
-        return .{
-            .textures = TextureTable.init(),
-            .state = TextureState{},
-        };
+        var self: Self = undefined;
+        self.initInPlace();
+        return self;
     }
 
     pub fn reset(self: *Self) void {
@@ -634,9 +648,14 @@ pub const TextureManager = struct {
 // Global instance
 // =============================================================================
 
-var g_texture_manager: TextureManager = TextureManager.init();
+var g_texture_manager: TextureManager = undefined;
+var g_texture_manager_init: bool = false;
 
 pub fn globalTextureManager() *TextureManager {
+    if (!g_texture_manager_init) {
+        g_texture_manager.initInPlace();
+        g_texture_manager_init = true;
+    }
     return &g_texture_manager;
 }
 
@@ -850,7 +869,7 @@ test "CpuTexturePool alloc and free" {
 test "TextureState binding" {
     var table = TextureTable.init();
     defer table.reset();
-    var state = TextureState{};
+    var state = TextureState.init();
 
     const id = try table.alloc();
 

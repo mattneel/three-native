@@ -159,14 +159,19 @@ const CpuSlice = struct {
     size: u32,
 };
 
-const CpuBufferPool = struct {
-    data: [CpuPoolBytes]u8 = undefined,
-    used: [CpuBlockCount]bool = [_]bool{false} ** CpuBlockCount,
+pub const CpuBufferPool = struct {
+    data: [CpuPoolBytes]u8,
+    used: [CpuBlockCount]bool,
 
     const Self = @This();
 
+    fn initInPlace(self: *Self) void {
+        @memset(&self.used, false);
+        // data is left uninitialized - it will be written before read
+    }
+
     fn reset(self: *Self) void {
-        @memset(self.used[0..], false);
+        @memset(&self.used, false);
     }
 
     fn alloc(self: *Self, size: usize) !CpuSlice {
@@ -211,7 +216,16 @@ const CpuBufferPool = struct {
     }
 };
 
-var g_cpu_pool: CpuBufferPool = CpuBufferPool{};
+var g_cpu_pool: CpuBufferPool = undefined;
+var g_cpu_pool_init: bool = false;
+
+fn globalCpuPool() *CpuBufferPool {
+    if (!g_cpu_pool_init) {
+        g_cpu_pool.initInPlace();
+        g_cpu_pool_init = true;
+    }
+    return &g_cpu_pool;
+}
 
 pub const BufferTable = struct {
     entries: [MaxBuffers]Entry,
@@ -226,32 +240,21 @@ pub const BufferTable = struct {
         buffer: Buffer,
     };
 
-    pub fn init() Self {
-        var entries: [MaxBuffers]Entry = undefined;
-        for (&entries, 0..) |*entry, idx| {
-            entry.* = .{
-                .active = false,
-                .generation = 1,
-                .buffer = .{
-                    .id = .{
-                        .index = @intCast(idx),
-                        .generation = 0,
-                    },
-                    .size = 0,
-                    .usage = .vertex,
-                    .data_len = 0,
-                    .update_count = 0,
-                    .backend = 0,
-                    .cpu_block_start = 0,
-                    .cpu_block_count = 0,
-                },
-            };
+    /// Initialize table in place - zeros memory at runtime, no comptime cost
+    pub fn initInPlace(self: *Self) void {
+        @memset(std.mem.asBytes(&self.entries), 0);
+        for (&self.entries, 0..) |*entry, idx| {
+            entry.generation = 1;
+            entry.buffer.id.index = @intCast(idx);
         }
-        return .{
-            .entries = entries,
-            .count = 0,
-            .cpu_pool = &g_cpu_pool,
-        };
+        self.count = 0;
+        self.cpu_pool = globalCpuPool();
+    }
+
+    pub fn init() Self {
+        var self: Self = undefined;
+        self.initInPlace();
+        return self;
     }
 
     pub fn initWithAllocator(_: std.mem.Allocator) Self {

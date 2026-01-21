@@ -220,47 +220,40 @@ pub const Program = struct {
     }
 };
 
-fn emptyUniformBlock() UniformBlock {
-    const empty_entry = UniformEntry{
-        .name_len = 0,
-        .name_bytes = [_]u8{0} ** MaxUniformNameBytes,
-        .utype = .INVALID,
-        .array_count = 0,
-        .offset = 0,
-        .stride = 0,
-        .size = 0,
-    };
-    return .{
-        .size = 0,
-        .count = 0,
-        .items = [_]UniformEntry{empty_entry} ** MaxProgramUniforms,
-        .buffer = [_]u8{0} ** MaxUniformBlockBytes,
-    };
+fn zeroedUniformBlock() UniformBlock {
+    var block: UniformBlock = undefined;
+    @memset(std.mem.asBytes(&block), 0);
+    return block;
 }
 
-fn emptySamplerEntry() SamplerEntry {
-    return .{
-        .name_len = 0,
-        .name_bytes = [_]u8{0} ** MaxUniformNameBytes,
-        .kind = .sampler2d,
-        .stage = .vertex,
-        .array_count = 1,
-        .units = [_]i32{0} ** MaxUniformArrayCount,
-        .gl_location = -1,
-        .dirty = false,
-    };
+fn zeroedSamplerEntry() SamplerEntry {
+    var entry: SamplerEntry = undefined;
+    @memset(std.mem.asBytes(&entry), 0);
+    entry.array_count = 1;
+    entry.gl_location = -1;
+    return entry;
 }
 
-fn emptyMatrixUniform() MatrixUniform {
-    return .{
-        .name_len = 0,
-        .name_bytes = [_]u8{0} ** MaxUniformNameBytes,
-        .utype = .INVALID,
-        .stage = .vertex,
-        .offset = 0,
-        .gl_location = -1,
-        .array_count = 0,
-    };
+fn zeroedMatrixUniform() MatrixUniform {
+    var uniform: MatrixUniform = undefined;
+    @memset(std.mem.asBytes(&uniform), 0);
+    uniform.gl_location = -1;
+    return uniform;
+}
+
+/// Reset a Program struct in place - zeros memory at runtime
+fn resetProgram(program: *Program, id: ProgramId) void {
+    @memset(std.mem.asBytes(program), 0);
+    program.id = id;
+    // Set non-zero defaults for samplers (gl_location = -1)
+    for (&program.samplers) |*s| {
+        s.gl_location = -1;
+        s.array_count = 1;
+    }
+    // Set non-zero defaults for matrix uniforms (gl_location = -1)
+    for (&program.mat_uniforms) |*m| {
+        m.gl_location = -1;
+    }
 }
 
 pub const ProgramTable = struct {
@@ -275,49 +268,24 @@ pub const ProgramTable = struct {
         program: Program,
     };
 
+    /// Initialize table - zeros memory at runtime, no comptime cost
+    pub fn initInPlace(self: *Self) void {
+        @memset(std.mem.asBytes(self), 0);
+        // Set non-zero defaults (generation = 1)
+        for (&self.entries, 0..) |*entry, idx| {
+            entry.generation = 1;
+            entry.program.id.index = @intCast(idx);
+        }
+    }
+
     pub fn init() Self {
-        return initWithAllocator(std.heap.page_allocator);
+        var self: Self = undefined;
+        self.initInPlace();
+        return self;
     }
 
     pub fn initWithAllocator(_: std.mem.Allocator) Self {
-        var entries: [MaxPrograms]Entry = undefined;
-        for (&entries, 0..) |*entry, idx| {
-            entry.* = .{
-                .active = false,
-                .generation = 1,
-                .program = .{
-                    .id = .{
-                        .index = @intCast(idx),
-                        .generation = 0,
-                    },
-                    .linked = false,
-                    .vertex_shader = null,
-                    .fragment_shader = null,
-                    .info_log_len = 0,
-                    .info_log_bytes = [_]u8{0} ** MaxProgramInfoLogBytes,
-                    .backend_shader = .{},
-                    .vertex_source_len = 0,
-                    .vertex_source = [_]u8{0} ** MaxTranslatedShaderBytes,
-                    .fragment_source_len = 0,
-                    .fragment_source = [_]u8{0} ** MaxTranslatedShaderBytes,
-                    .attr_count = 0,
-                    .attr_name_lens = [_]u8{0} ** MaxProgramAttrs,
-                    .attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs,
-                    .vs_uniforms = emptyUniformBlock(),
-                    .fs_uniforms = emptyUniformBlock(),
-                    .sampler_count = 0,
-                    .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
-                    .link_version = 0,
-                    .mat_uniform_count = 0,
-                    .mat_uniforms = [_]MatrixUniform{emptyMatrixUniform()} ** MaxMatrixUniforms,
-                    .gl_program = 0,
-                },
-            };
-        }
-        return .{
-            .entries = entries,
-            .count = 0,
-        };
+        return init();
     }
 
     pub fn alloc(self: *Self) !ProgramId {
@@ -329,30 +297,7 @@ pub const ProgramTable = struct {
                     .index = @intCast(idx),
                     .generation = entry.generation,
                 };
-                entry.program = .{
-                    .id = id,
-                    .linked = false,
-                    .vertex_shader = null,
-                    .fragment_shader = null,
-                    .info_log_len = 0,
-                    .info_log_bytes = [_]u8{0} ** MaxProgramInfoLogBytes,
-                    .backend_shader = .{},
-                    .vertex_source_len = 0,
-                    .vertex_source = [_]u8{0} ** MaxTranslatedShaderBytes,
-                    .fragment_source_len = 0,
-                    .fragment_source = [_]u8{0} ** MaxTranslatedShaderBytes,
-                    .attr_count = 0,
-                    .attr_name_lens = [_]u8{0} ** MaxProgramAttrs,
-                    .attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs,
-                    .vs_uniforms = emptyUniformBlock(),
-                    .fs_uniforms = emptyUniformBlock(),
-                    .sampler_count = 0,
-                    .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
-                    .link_version = 0,
-                    .mat_uniform_count = 0,
-                    .mat_uniforms = [_]MatrixUniform{emptyMatrixUniform()} ** MaxMatrixUniforms,
-                    .gl_program = 0,
-                };
+                resetProgram(&entry.program, id);
                 entry.active = true;
                 self.count += 1;
                 return id;
@@ -728,33 +673,8 @@ pub const ProgramTable = struct {
         self.clearBackend(entry);
         entry.active = false;
         entry.generation +%= 1;
-        entry.program = .{
-            .id = .{
-                .index = id.index,
-                .generation = 0,
-            },
-            .linked = false,
-            .vertex_shader = null,
-            .fragment_shader = null,
-            .info_log_len = 0,
-            .info_log_bytes = [_]u8{0} ** MaxProgramInfoLogBytes,
-            .backend_shader = .{},
-            .vertex_source_len = 0,
-            .vertex_source = [_]u8{0} ** MaxTranslatedShaderBytes,
-            .fragment_source_len = 0,
-            .fragment_source = [_]u8{0} ** MaxTranslatedShaderBytes,
-            .attr_count = 0,
-            .attr_name_lens = [_]u8{0} ** MaxProgramAttrs,
-            .attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs,
-            .vs_uniforms = emptyUniformBlock(),
-            .fs_uniforms = emptyUniformBlock(),
-            .sampler_count = 0,
-            .samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers,
-            .link_version = 0,
-            .mat_uniform_count = 0,
-            .mat_uniforms = [_]MatrixUniform{emptyMatrixUniform()} ** MaxMatrixUniforms,
-            .gl_program = 0,
-        };
+        const cleared_id = ProgramId{ .index = id.index, .generation = 0 };
+        resetProgram(&entry.program, cleared_id);
         self.count -= 1;
         return true;
     }
@@ -766,11 +686,11 @@ pub const ProgramTable = struct {
     }
 
     pub fn reset(self: *Self) void {
-        self.* = Self.init();
+        self.initInPlace();
     }
 
     pub fn deinit(self: *Self) void {
-        self.* = Self.init();
+        self.initInPlace();
     }
 
     /// Apply mat2/mat3 uniforms via direct GL calls.
@@ -907,7 +827,7 @@ pub const ProgramTable = struct {
 
     fn clearUniformBlock(self: *Self, block: *UniformBlock) void {
         _ = self;
-        block.* = emptyUniformBlock();
+        block.* = zeroedUniformBlock();
     }
 
     fn clearUniforms(self: *Self, entry: *Entry) void {
@@ -922,25 +842,30 @@ pub const ProgramTable = struct {
         }
         entry.program.vertex_source_len = 0;
         entry.program.fragment_source_len = 0;
-        entry.program.attr_name_lens = [_]u8{0} ** MaxProgramAttrs;
-        entry.program.attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs;
+        @memset(&entry.program.attr_name_lens, 0);
+        @memset(std.mem.asBytes(&entry.program.attr_names), 0);
         entry.program.attr_count = 0;
         entry.program.sampler_count = 0;
-        entry.program.samplers = [_]SamplerEntry{emptySamplerEntry()} ** MaxProgramSamplers;
+        for (&entry.program.samplers) |*s| {
+            @memset(std.mem.asBytes(s), 0);
+            s.array_count = 1;
+            s.gl_location = -1;
+        }
         self.clearUniforms(entry);
     }
 
     fn collectAttrNames(self: *Self, entry: *Entry, source: []const u8) !void {
         _ = self;
-        entry.program.attr_name_lens = [_]u8{0} ** MaxProgramAttrs;
-        entry.program.attr_names = [_][MaxAttrNameBytes]u8{[_]u8{0} ** MaxAttrNameBytes} ** MaxProgramAttrs;
+        @memset(&entry.program.attr_name_lens, 0);
+        @memset(std.mem.asBytes(&entry.program.attr_names), 0);
         entry.program.attr_count = 0;
 
         // Simple preprocessor state to handle #ifdef/#ifndef/#else/#endif
         const MaxDefines: usize = 32;
         const MaxIfdefDepth: usize = 16;
         var defines: [MaxDefines][MaxAttrNameBytes]u8 = undefined;
-        var define_lens: [MaxDefines]u8 = [_]u8{0} ** MaxDefines;
+        var define_lens: [MaxDefines]u8 = undefined;
+        @memset(&define_lens, 0);
         var define_count: usize = 0;
         var ifdef_stack: [MaxIfdefDepth]bool = undefined; // true = active section
         var ifdef_depth: usize = 0;
@@ -1119,7 +1044,7 @@ pub const ProgramTable = struct {
         _ = self;
         _ = block_size; // Recompute instead of using passed-in size
         const block = if (stage == .vertex) &entry.program.vs_uniforms else &entry.program.fs_uniforms;
-        block.* = emptyUniformBlock();
+        block.* = zeroedUniformBlock();
         if (decls.len == 0) return;
         if (decls.len > MaxProgramUniforms) return error.TooManyUniforms;
         block.count = @intCast(decls.len);
@@ -1167,7 +1092,7 @@ pub const ProgramTable = struct {
             if (entry.program.sampler_count >= MaxProgramSamplers) return error.TooManySamplers;
             if (decl.name.len >= MaxUniformNameBytes) return error.UniformNameTooLong;
             const index: usize = @intCast(entry.program.sampler_count);
-            entry.program.samplers[index] = emptySamplerEntry();
+            entry.program.samplers[index] = zeroedSamplerEntry();
             entry.program.samplers[index].kind = decl.kind;
             entry.program.samplers[index].stage = stage;
             entry.program.samplers[index].array_count = decl.array_count;
@@ -1643,7 +1568,8 @@ fn isUniformUsedInShader(source: []const u8, name: []const u8) bool {
     const MaxDefines: usize = 32;
     const MaxIfdefDepth: usize = 16;
     var defines: [MaxDefines][MaxAttrNameBytes]u8 = undefined;
-    var define_lens: [MaxDefines]u8 = [_]u8{0} ** MaxDefines;
+    var define_lens: [MaxDefines]u8 = undefined;
+    @memset(&define_lens, 0);
     var define_count: usize = 0;
     var ifdef_stack: [MaxIfdefDepth]bool = undefined;
     var ifdef_depth: usize = 0;
@@ -1946,9 +1872,14 @@ fn isWordChar(ch: u8) bool {
         ch == '_';
 }
 
-var g_program_table: ProgramTable = ProgramTable.init();
+var g_program_table: ProgramTable = undefined;
+var g_program_table_init: bool = false;
 
 pub fn globalProgramTable() *ProgramTable {
+    if (!g_program_table_init) {
+        g_program_table.initInPlace();
+        g_program_table_init = true;
+    }
     return &g_program_table;
 }
 

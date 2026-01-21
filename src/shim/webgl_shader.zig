@@ -41,30 +41,20 @@ pub const ShaderTable = struct {
         info_bytes: [MaxShaderInfoLogBytes]u8,
     };
 
-    pub fn init() Self {
-        var entries: [MaxShaders]Entry = undefined;
-        for (&entries, 0..) |*entry, idx| {
-            entry.* = .{
-                .active = false,
-                .generation = 1,
-                .shader = .{
-                    .id = .{
-                        .index = @intCast(idx),
-                        .generation = 0,
-                    },
-                    .kind = .vertex,
-                    .source_len = 0,
-                    .compiled = false,
-                    .info_len = 0,
-                },
-                .source_bytes = [_]u8{0} ** MaxShaderSourceBytes,
-                .info_bytes = [_]u8{0} ** MaxShaderInfoLogBytes,
-            };
+    /// Initialize table - zeros memory at runtime, no comptime cost
+    pub fn initInPlace(self: *Self) void {
+        @memset(std.mem.asBytes(self), 0);
+        // Set non-zero defaults (generation = 1)
+        for (&self.entries, 0..) |*entry, idx| {
+            entry.generation = 1;
+            entry.shader.id.index = @intCast(idx);
         }
-        return .{
-            .entries = entries,
-            .count = 0,
-        };
+    }
+
+    pub fn init() Self {
+        var self: Self = undefined;
+        self.initInPlace();
+        return self;
     }
 
     pub fn initWithAllocator(_: std.mem.Allocator) Self {
@@ -168,11 +158,11 @@ pub const ShaderTable = struct {
     }
 
     pub fn reset(self: *Self) void {
-        self.* = Self.init();
+        self.initInPlace();
     }
 
     pub fn deinit(self: *Self) void {
-        self.* = Self.init();
+        self.initInPlace();
     }
 
     fn setInfoLog(self: *Self, entry: *Entry, log: []const u8) !void {
@@ -187,9 +177,14 @@ pub const ShaderTable = struct {
     }
 };
 
-var g_shader_table: ShaderTable = ShaderTable.init();
+var g_shader_table: ShaderTable = undefined;
+var g_shader_table_init: bool = false;
 
 pub fn globalShaderTable() *ShaderTable {
+    if (!g_shader_table_init) {
+        g_shader_table.initInPlace();
+        g_shader_table_init = true;
+    }
     return &g_shader_table;
 }
 

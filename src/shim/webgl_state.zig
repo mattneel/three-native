@@ -99,12 +99,16 @@ pub const BufferManager = struct {
 
     const Self = @This();
 
+    pub fn initInPlace(self: *Self) void {
+        self.buffers.initInPlace();
+        self.binds = BindState{};
+        self.backend = null;
+    }
+
     pub fn init() Self {
-        return .{
-            .buffers = webgl.BufferTable.init(),
-            .binds = BindState{},
-            .backend = null,
-        };
+        var self: Self = undefined;
+        self.initInPlace();
+        return self;
     }
 
     pub fn initWithAllocator(_: std.mem.Allocator) Self {
@@ -112,11 +116,11 @@ pub const BufferManager = struct {
     }
 
     pub fn initWithBackend(backend: *const webgl.BufferBackend) Self {
-        return .{
-            .buffers = webgl.BufferTable.init(),
-            .binds = BindState{},
-            .backend = backend,
-        };
+        var self: Self = undefined;
+        self.buffers.initInPlace();
+        self.binds = BindState{};
+        self.backend = backend;
+        return self;
     }
 
     pub fn setBackend(self: *Self, backend: *const webgl.BufferBackend) !void {
@@ -162,9 +166,14 @@ pub const BufferManager = struct {
     }
 };
 
-var g_buffer_manager: BufferManager = BufferManager.init();
+var g_buffer_manager: BufferManager = undefined;
+var g_buffer_manager_init: bool = false;
 
 pub fn globalBufferManager() *BufferManager {
+    if (!g_buffer_manager_init) {
+        g_buffer_manager.initInPlace();
+        g_buffer_manager_init = true;
+    }
     return &g_buffer_manager;
 }
 
